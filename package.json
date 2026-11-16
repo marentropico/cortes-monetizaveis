@@ -1,0 +1,12 @@
+{
+  "name": "hard-cleeps-studio",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Hard Cleeps Studio 9:16 - Standalone Desktop App",
+  "scripts": {
+    "dev": ".venv\\Scripts\\python.exe launcher.py --dev",
+    "build": "npm --prefix frontend run build",
+    "start": ".venv\\Scripts\\python.exe launcher.py",
+    "legacy": ".venv\\Scripts\\python.exe app.py"
+  }
+}
