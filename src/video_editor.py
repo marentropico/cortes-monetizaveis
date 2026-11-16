@@ -118,11 +118,22 @@ class VerticalVideoEditor:
         cv2.imwrite(str(mask_path), mask)
         return mask_path
 
+    @staticmethod
+    def _get_branding_assets() -> tuple[Path, Path | None] | None:
+        """Return (logo.png, follow.png | None) from assets/ if logo.png exists."""
+        assets_dir = PROJECT_ROOT / "assets"
+        logo = assets_dir / "logo.png"
+        follow = assets_dir / "follow.png"
+        if logo.is_file():
+            return logo, (follow if follow.is_file() else None)
+        return None
+
     def _build_filter_complex(
         self,
         crop_info: FaceCropResult,
         ass_rel_posix: str | None,
-    ) -> tuple[str, Path | None]:
+        clip_duration: float = 30.0,
+    ) -> tuple[str, list[Path]]:
         sub_suffix = f",subtitles='{ass_rel_posix}'" if ass_rel_posix else ""
 
         if crop_info.mode == "pip_split" and crop_info.face_crop:
@@ -132,20 +143,69 @@ class VerticalVideoEditor:
             fx = fc["x"] + (fc["w"] - side) // 2
             fy = fc["y"] + (fc["h"] - side) // 2
             mask_path = self._ensure_circle_mask_png(340)
-            fc_str = (
-                "[0:v]setpts=PTS-STARTPTS,split=3[vtop][vbot][vface];"
-                "[vtop]scale=1080:608:flags=lanczos,setsar=1[top];"
-                f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
-                "scale=1080:1312:flags=lanczos,setsar=1[bot];"
-                "[top][bot]vstack=inputs=2,"
-                "drawbox=x=0:y=606:w=1080:h=4:color=0x00E6FF@0.85:t=fill[base];"
-                f"[vface]crop={side}:{side}:{fx}:{fy},"
-                "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
-                "[1:v]format=gray[mask];"
-                "[f_rgba][mask]alphamerge[f_circ];"
-                f"[base][f_circ]overlay=x=696:y=438:shortest=1{sub_suffix}[vout]"
-            )
-            return fc_str, mask_path
+            extra_inputs: list[Path] = [mask_path]
+
+            branding = self._get_branding_assets()
+            if branding is not None:
+                logo_path, follow_path = branding
+                extra_inputs.append(logo_path)
+                if follow_path is not None:
+                    extra_inputs.append(follow_path)
+                    mid = max(2.0, float(clip_duration) / 2.0)
+                    pop_expr = (
+                        f"if(lt(t-{mid:.3f},0.16),0.72+0.40*(t-{mid:.3f})/0.16,"
+                        f"if(lt(t-{mid:.3f},0.28),1.12-0.12*(t-{mid:.3f}-0.16)/0.12,1.0))"
+                    )
+                    fc_str = (
+                        "[0:v]setpts=PTS-STARTPTS,split=3[vtop][vbot][vface];"
+                        "[vtop]scale=1080:608:flags=lanczos,setsar=1[top];"
+                        f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
+                        "scale=1080:1312:flags=lanczos,setsar=1[bot];"
+                        "[top][bot]vstack=inputs=2,"
+                        "drawbox=x=0:y=606:w=1080:h=4:color=0x00E6FF@0.85:t=fill[base];"
+                        f"[vface]crop={side}:{side}:{fx}:{fy},"
+                        "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
+                        "[1:v]format=gray[mask];"
+                        "[f_rgba][mask]alphamerge[f_circ];"
+                        "[base][f_circ]overlay=x=696:y=438:shortest=1[base_circ];"
+                        "[2:v]scale=460:250:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba[brand_logo];"
+                        "[3:v]scale=460:250:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,"
+                        f"scale=w='trunc(iw*{pop_expr}/2)*2':h=-2:eval=frame:flags=lanczos[brand_follow];"
+                        f"[base_circ][brand_logo]overlay=x=420-w/2:y=608-h/2:enable='lt(t,{mid:.3f})':shortest=1[base_b1];"
+                        f"[base_b1][brand_follow]overlay=x=420-w/2:y=608-h/2:enable='gte(t,{mid:.3f})':shortest=1"
+                        f"{sub_suffix}[vout]"
+                    )
+                else:
+                    fc_str = (
+                        "[0:v]setpts=PTS-STARTPTS,split=3[vtop][vbot][vface];"
+                        "[vtop]scale=1080:608:flags=lanczos,setsar=1[top];"
+                        f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
+                        "scale=1080:1312:flags=lanczos,setsar=1[bot];"
+                        "[top][bot]vstack=inputs=2,"
+                        "drawbox=x=0:y=606:w=1080:h=4:color=0x00E6FF@0.85:t=fill[base];"
+                        f"[vface]crop={side}:{side}:{fx}:{fy},"
+                        "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
+                        "[1:v]format=gray[mask];"
+                        "[f_rgba][mask]alphamerge[f_circ];"
+                        "[base][f_circ]overlay=x=696:y=438:shortest=1[base_circ];"
+                        "[2:v]scale=460:250:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba[brand_logo];"
+                        f"[base_circ][brand_logo]overlay=x=420-w/2:y=608-h/2:shortest=1{sub_suffix}[vout]"
+                    )
+            else:
+                fc_str = (
+                    "[0:v]setpts=PTS-STARTPTS,split=3[vtop][vbot][vface];"
+                    "[vtop]scale=1080:608:flags=lanczos,setsar=1[top];"
+                    f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
+                    "scale=1080:1312:flags=lanczos,setsar=1[bot];"
+                    "[top][bot]vstack=inputs=2,"
+                    "drawbox=x=0:y=606:w=1080:h=4:color=0x00E6FF@0.85:t=fill[base];"
+                    f"[vface]crop={side}:{side}:{fx}:{fy},"
+                    "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
+                    "[1:v]format=gray[mask];"
+                    "[f_rgba][mask]alphamerge[f_circ];"
+                    f"[base][f_circ]overlay=x=696:y=438:shortest=1{sub_suffix}[vout]"
+                )
+            return fc_str, extra_inputs
 
         if crop_info.mode == "split_screen" and crop_info.face_crop:
             fc = crop_info.face_crop
@@ -159,7 +219,7 @@ class VerticalVideoEditor:
                 "[top][bot]vstack=inputs=2,"
                 "drawbox=x=0:y=637:w=1080:h=6:color=0x00E6FF@0.9:t=fill"
                 f"{sub_suffix}[vout]"
-            ), None
+            ), []
 
         if crop_info.mode == "center_only":
             gc = crop_info.gameplay_crop
@@ -167,7 +227,7 @@ class VerticalVideoEditor:
                 "[0:v]setpts=PTS-STARTPTS,"
                 f"crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
                 f"scale=1080:1920:flags=lanczos,setsar=1{sub_suffix}[vout]"
-            ), None
+            ), []
 
         # blur_bg mode
         bg_crop = _compute_gameplay_crop(crop_info.frame_width, crop_info.frame_height, 1080, 1920)
@@ -185,7 +245,7 @@ class VerticalVideoEditor:
             "scale=1080:1920:flags=bilinear,boxblur=25:5,eq=brightness=-0.12,setsar=1[bg];"
             f"[vfg]scale={fg_w}:{fg_h}:flags=lanczos,setsar=1[fg];"
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2{sub_suffix}[vout]"
-        ), None
+        ), []
 
     def _run_ffmpeg_render(
         self,
@@ -196,7 +256,7 @@ class VerticalVideoEditor:
         has_audio: bool,
         output_file: Path,
         encoder: str,
-        extra_mask_input: Path | None = None,
+        extra_inputs: list[Path] | None = None,
     ) -> tuple[bool, str]:
         cmd = [
             self.ffmpeg_bin,
@@ -211,8 +271,8 @@ class VerticalVideoEditor:
             "-i",
             str(video_path),
         ]
-        if extra_mask_input is not None:
-            cmd.extend(["-loop", "1", "-i", str(extra_mask_input)])
+        for extra_inp in extra_inputs or []:
+            cmd.extend(["-loop", "1", "-t", f"{duration:.3f}", "-i", str(extra_inp)])
 
         cmd.extend([
             "-filter_complex",
@@ -457,7 +517,9 @@ class VerticalVideoEditor:
                 )
                 ass_rel_posix = ass_path.relative_to(PROJECT_ROOT).as_posix()
 
-            filter_complex, extra_mask = self._build_filter_complex(crop_res, ass_rel_posix)
+            filter_complex, extra_inputs = self._build_filter_complex(
+                crop_res, ass_rel_posix, clip_duration=duration
+            )
 
             if progress_callback:
                 progress_callback(
@@ -472,7 +534,7 @@ class VerticalVideoEditor:
                 has_audio=has_audio,
                 output_file=out_mp4,
                 encoder=self.preferred_encoder,
-                extra_mask_input=extra_mask,
+                extra_inputs=extra_inputs,
             )
             used_encoder = self.preferred_encoder
 
@@ -490,7 +552,7 @@ class VerticalVideoEditor:
                     has_audio=has_audio,
                     output_file=out_mp4,
                     encoder="libx264",
-                    extra_mask_input=extra_mask,
+                    extra_inputs=extra_inputs,
                 )
 
             if not ok:

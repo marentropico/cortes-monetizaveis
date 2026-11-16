@@ -4,8 +4,11 @@ import {
   ChevronDown,
   ChevronUp,
   Code2,
+  Download,
+  ExternalLink,
   Eye,
   Film,
+  Link2,
   Loader2,
   Play,
   Plus,
@@ -18,7 +21,14 @@ import {
   Trash2,
 } from "lucide-react";
 import { api } from "../api";
-import type { CutItem, InputVideo, JobState, PresetOption, TranscriptMeta } from "../types";
+import type {
+  CutItem,
+  DownloaderStatus,
+  InputVideo,
+  JobState,
+  PresetOption,
+  TranscriptMeta,
+} from "../types";
 
 interface StudioTabProps {
   videos: InputVideo[];
@@ -77,6 +87,28 @@ export function StudioTab({
   const [busyPreview, setBusyPreview] = useState(false);
   const [savingCuts, setSavingCuts] = useState(false);
 
+  // YouTube URL Downloader (YtoWave yt-dlp)
+  const [dlStatus, setDlStatus] = useState<DownloaderStatus | null>(null);
+  const [checkingDl, setCheckingDl] = useState(false);
+  const [ytUrl, setYtUrl] = useState("");
+  const [ytQuality, setYtQuality] = useState("1080p");
+
+  const checkDownloader = async () => {
+    setCheckingDl(true);
+    try {
+      const st = await api.downloaderStatus();
+      setDlStatus(st);
+    } catch {
+      // ignore
+    } finally {
+      setCheckingDl(false);
+    }
+  };
+
+  useEffect(() => {
+    void checkDownloader();
+  }, []);
+
   useEffect(() => {
     if (!selectedVideo && videos.length > 0) {
       setSelectedVideo(videos[0].filename);
@@ -90,14 +122,35 @@ export function StudioTab({
 
   useEffect(() => {
     const res = activeJob?.result as
-      | { preview_url?: string; rendered?: Array<{ media_url: string; title: string }> }
+      | {
+          preview_url?: string;
+          rendered?: Array<{ media_url: string; title: string }>;
+          downloaded_filename?: string;
+        }
       | null
       | undefined;
     if (res?.preview_url) setPreviewImgUrl(res.preview_url);
     if (res?.rendered && res.rendered.length > 0) {
       setSelectedRenderedUrl(res.rendered[0].media_url);
     }
+    if (res?.downloaded_filename) {
+      setSelectedVideo(res.downloaded_filename);
+      setYtUrl("");
+    }
   }, [activeJob?.result]);
+
+  const handleDownloadUrl = async () => {
+    if (!ytUrl.trim()) {
+      onNotify("Cole o link do vídeo do YouTube.", "err");
+      return;
+    }
+    try {
+      const { job_id } = await api.downloadYoutubeUrl(ytUrl.trim(), ytQuality);
+      onStartJob(job_id);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : "Erro ao iniciar download", "err");
+    }
+  };
 
   const isRunning = activeJob?.status === "running";
   const renderedList =
@@ -263,6 +316,72 @@ export function StudioTab({
           </div>
         </div>
 
+        {/* YouTube URL Downloader via YtoWave yt-dlp */}
+        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/70 p-3.5">
+          {dlStatus?.available ? (
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="flex flex-1 items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2">
+                <Link2 className="h-4 w-4 shrink-0 text-rose-400" />
+                <input
+                  value={ytUrl}
+                  onChange={(e) => setYtUrl(e.target.value)}
+                  placeholder="Cole o link do YouTube para baixar direto em input/ (ex: https://youtube.com/watch?v=...)"
+                  className="w-full bg-transparent text-xs text-slate-100 placeholder-slate-500 outline-none"
+                />
+              </div>
+              <select
+                value={ytQuality}
+                onChange={(e) => setYtQuality(e.target.value)}
+                className="rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-200 outline-none"
+              >
+                <option value="1080p">1080p (MP4)</option>
+                <option value="best">Máxima (MP4)</option>
+                <option value="720p">720p (MP4)</option>
+              </select>
+              <button
+                disabled={isRunning || !ytUrl.trim()}
+                onClick={() => void handleDownloadUrl()}
+                title={`Usando: ${dlStatus.yt_dlp_path}`}
+                className="flex items-center justify-center gap-1.5 rounded-xl bg-rose-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {activeJob?.kind === "download" && isRunning ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                Baixar para input/
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs text-slate-300">
+                <span className="font-semibold text-amber-300">YtoWave / yt-dlp.exe não encontrado.</span>{" "}
+                Instale o YtoWave para baixar vídeos do YouTube direto na pasta{" "}
+                <code className="text-sky-400">input/</code> e depois reabra o programa ou clique em verificar.
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={dlStatus?.download_page_url || "https://marentropico.github.io/ytowave/"}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-1.5 rounded-xl bg-rose-600 px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-rose-500"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Baixar YtoWave
+                </a>
+                <button
+                  disabled={checkingDl}
+                  onClick={() => void checkDownloader()}
+                  className="flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-200 hover:border-sky-500/50 disabled:opacity-50"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${checkingDl ? "animate-spin" : ""}`} />
+                  Verificar Novamente
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Advanced Settings Toggle */}
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800/80 pt-3">
           <button
@@ -417,6 +536,36 @@ export function StudioTab({
           </div>
         )}
       </div>
+
+      {/* Live Download Progress */}
+      {activeJob && activeJob.kind === "download" && (
+        <div className="rounded-2xl border border-rose-500/30 bg-slate-900/70 p-4">
+          <div className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-200">
+            <span className="flex items-center gap-2">
+              {activeJob.status === "running" ? (
+                <Loader2 className="h-4 w-4 animate-spin text-rose-400" />
+              ) : activeJob.status === "done" ? (
+                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+              ) : (
+                <span className="h-2.5 w-2.5 rounded-full bg-rose-500" />
+              )}
+              {activeJob.title}
+            </span>
+            <span className="font-mono text-sky-400">{activeJob.progress}%</span>
+          </div>
+          <div className="mb-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+            <div
+              className="h-full bg-gradient-to-r from-rose-500 to-orange-400 transition-all"
+              style={{ width: `${activeJob.progress}%` }}
+            />
+          </div>
+          <div className="max-h-28 overflow-y-auto rounded-xl border border-slate-800 bg-slate-950 p-2.5 font-mono text-[11px] text-slate-300">
+            {activeJob.logs.slice(-15).map((line, i) => (
+              <div key={i}>{line}</div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Live Progress & Logs */}
       {activeJob && activeJob.kind === "pipeline" && (

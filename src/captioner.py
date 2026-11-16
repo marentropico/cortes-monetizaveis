@@ -163,19 +163,11 @@ class ASSCaptionGenerator:
         blocks = _chunk_words(words, max_words=self.words_per_line)
 
         cfg = self.cfg
-        if layout_mode == "pip_split":
-            # Positioned right below the y=608 split seam, to the left of the circular facecam (x=696..1036)
-            cap_align = 8
-            cap_margin_l = 45
-            cap_margin_r = 415
-            cap_margin_v = 632
-            cap_fontsize = max(44, int(cfg["fontsize"]) - 10)
-        else:
-            cap_align = 2
-            cap_margin_l = 60
-            cap_margin_r = 60
-            cap_margin_v = 320 if layout_mode == "split_screen" else 360
-            cap_fontsize = int(cfg["fontsize"])
+        cap_align = 2
+        cap_margin_l = 60
+        cap_margin_r = 60
+        cap_margin_v = 340 if layout_mode in ("pip_split", "split_screen") else 360
+        cap_fontsize = int(cfg["fontsize"])
         primary_ass = _rgb_to_ass_aabbggrr(cfg["inactive_color"])
         outline_ass = _rgb_to_ass_aabbggrr(cfg["outline_color"])
         hook_ass = _rgb_to_ass_aabbggrr(cfg["hook_color"])

@@ -217,6 +217,35 @@ def render_hook_thumbnail(
     return output_path
 
 
+def get_thumbnail_path_for_clip(video_path: str | Path) -> Path:
+    vpath = Path(video_path).resolve()
+    proj_slug = re.sub(r"[^A-Za-z0-9_-]+", "_", vpath.parent.name).strip("_")[:40] or "shorts"
+    return THUMBNAILS_DIR / proj_slug / f"{vpath.stem}_thumb.jpg"
+
+
+def ensure_thumbnail_for_clip(
+    video_path: str | Path,
+    hook_text: str = "",
+    youtube_title: str = "",
+) -> Path:
+    """Ensure a clickbait Hook thumbnail exists for the given clip MP4."""
+    vpath = Path(video_path).resolve()
+    out_jpg = get_thumbnail_path_for_clip(vpath)
+    if out_jpg.is_file():
+        return out_jpg
+
+    hook = hook_text.strip()
+    if not hook:
+        clips_by_path = {str(Path(c["output_path"]).resolve()): c for c in list_rendered_clips()}
+        clip_meta = clips_by_path.get(str(vpath), {})
+        hook = str(clip_meta.get("hook_text") or "").strip()
+    if not hook and youtube_title:
+        hook = re.sub(r"[^\w\s!?.,áéíóúâêôãõçÁÉÍÓÚÂÊÔÃÕÇ-]", "", youtube_title).strip()
+
+    base_img = _extract_mp4_frame(vpath, timestamp=2.5)
+    return render_hook_thumbnail(base_img, hook_text=hook, output_path=out_jpg)
+
+
 def generate_thumbnails_for_clips(
     selected_paths: list[str] | None = None,
     prefer_youtube_cover: bool = True,

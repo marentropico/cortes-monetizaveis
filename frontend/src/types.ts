@@ -1,6 +1,6 @@
 export interface JobState {
   job_id: string;
-  kind: "pipeline" | "upload";
+  kind: "pipeline" | "upload" | "download";
   title: string;
   status: "running" | "done" | "error";
   step: string;
@@ -21,6 +21,12 @@ export interface HealthInfo {
   pool_active: boolean;
   clips_count: number;
   current_job: JobState | null;
+}
+
+export interface DownloaderStatus {
+  available: boolean;
+  yt_dlp_path: string;
+  download_page_url: string;
 }
 
 export interface PresetOption {

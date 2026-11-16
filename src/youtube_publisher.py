@@ -484,6 +484,7 @@ def upload_single_short(
     description: str,
     visibility: str = "PUBLIC",
     progress_callback: Callable[[str], None] | None = None,
+    thumbnail_path: str | Path | None = None,
 ) -> tuple[bool, str]:
     """Upload one MP4 to YouTube Studio through the open logged-in browser page."""
     vpath = Path(video_path).resolve()
@@ -535,6 +536,21 @@ def upload_single_short(
     not_kids.scroll_into_view_if_needed()
     not_kids.click()
     time.sleep(0.8)
+
+    # Attach Hook thumbnail in Step 1 (Details) if available and enabled by YouTube Studio
+    if thumbnail_path and Path(thumbnail_path).is_file():
+        try:
+            thumb_input = page.locator('ytcp-video-thumbnail-editor input[type="file"]').first
+            if thumb_input.count() > 0:
+                _attach_file_via_cdp(page, thumb_input, Path(thumbnail_path))
+                time.sleep(1.2)
+                if progress_callback:
+                    progress_callback(f"🖼️ Capa Hook anexada: {Path(thumbnail_path).name}")
+            elif progress_callback:
+                progress_callback("ℹ️ Campo de miniatura indisponível para este Short durante o upload.")
+        except Exception as exc:
+            if progress_callback:
+                progress_callback(f"ℹ️ Miniatura não anexada no upload ({exc}); seguindo publicação.")
 
     # Grab video URL early if displayed on right-hand side card
     yt_url = ""
@@ -706,6 +722,20 @@ def upload_queue(
                     f"[{idx}/{len(targets)}] Postando #{item['id']}: {item['youtube_title']}"
                 )
 
+            thumb_path: Path | None = None
+            try:
+                from src.thumbnail_generator import ensure_thumbnail_for_clip
+
+                thumb_path = ensure_thumbnail_for_clip(
+                    vpath,
+                    youtube_title=str(item.get("youtube_title", "")),
+                )
+                if progress_callback:
+                    progress_callback(f"🎨 Capa Hook pronta: {thumb_path.name}")
+            except Exception as exc:
+                if progress_callback:
+                    progress_callback(f"ℹ️ Capa Hook ignorada ({exc}); seguindo upload.")
+
             upload_page = ctx.new_page()
             try:
                 ok, msg = upload_single_short(
@@ -715,6 +745,7 @@ def upload_queue(
                     description=item["youtube_description"],
                     visibility=visibility,
                     progress_callback=progress_callback,
+                    thumbnail_path=thumb_path,
                 )
             except Exception as exc:
                 ok, msg = False, str(exc)

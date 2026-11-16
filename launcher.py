@@ -106,12 +106,10 @@ def main() -> None:
             _wait_for_url(target_url, timeout=20.0)
 
         print(f"[Studio] Abrindo janela standalone: {target_url}")
-        app_proc = _open_standalone_window(target_url)
+        print("[Studio] Mantenha este terminal aberto enquanto usa o app (Ctrl+C para encerrar).")
+        _open_standalone_window(target_url)
 
-        if app_proc is not None:
-            app_proc.wait()
-        else:
-            backend_proc.wait()
+        backend_proc.wait()
     except KeyboardInterrupt:
         pass
     finally:

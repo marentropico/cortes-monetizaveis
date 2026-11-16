@@ -38,8 +38,10 @@ Cortes Monetizaveis/
 │   ├── thumbnail_generator.py # Capas 1080x1920 com Hook + upload no YouTube Studio
 │   ├── youtube_publisher.py   # Fila de postagem + automação Chrome CDP
 │   ├── youtube_analytics.py   # Coleta via YouTube Data API v3 / Studio CDP + Coach IA
+│   ├── youtube_downloader.py  # Descoberta do yt-dlp (YtoWave) e download direto para input/
 │   ├── llm_pool.py            # Pool de chaves Gemini/OpenRouter com round-robin e fallback
 │   └── demo_generator.py      # Gerador de vídeo demo sintético para testes
+├── assets/                    # Marca do canal para overlay (logo.png e follow.png)
 ├── remotion/                  # Projeto Remotion Studio integrado (templates React 9:16)
 ├── input/                     # Vídeos brutos 16:9 de entrada
 ├── output/                    # Shorts renderizados, thumbnails e índices JSON
@@ -130,6 +132,23 @@ npm run legacy
    Atualize as métricas pela **API v3** ou **Studio CDP**, compare o desempenho por faixa (`30s`, `60s`, `90s`) e gere sugestões com o **Coach IA**.
 5. **Iniciar Novo Ciclo (`Limpar Registros`):**
    Após concluir os uploads e remover os vídeos antigos de `input/`, clique em **Limpar Registros** na barra lateral para zerar `output/`, filas e caches antigos com segurança.
+
+---
+
+## Personalização de Marca (`assets/logo.png` e `assets/follow.png`)
+
+Qualquer usuário pode personalizar os cortes com a identidade do seu canal colocando dois arquivos **PNG com fundo transparente** na pasta `assets/`:
+
+- `assets/logo.png`: exibido na **primeira metade** do corte, ao lado esquerdo do círculo da facecam (`pip_split`).
+- `assets/follow.png` *(opcional)*: na **metade do vídeo**, substitui o logo com um leve **"pop" visual** (`0.28s`, sem áudio) convidando o público a se inscrever/seguir. Se `follow.png` não existir, apenas `logo.png` permanece visível durante todo o corte.
+
+> **Ajuste automático de tamanho:** não importa a resolução ou proporção da sua imagem original (quadrada, horizontal ou vertical) — o renderizador redimensiona proporcionalmente para caber dentro da área segura máxima de **`460 x 250` px**, centralizada ao lado esquerdo do círculo da facecam, sem invadir a facecam, o Hook superior ou as legendas.
+
+---
+
+## Download Direto do YouTube (Integração YtoWave)
+
+Na aba **Estúdio & Pipeline**, é possível colar um link do YouTube para baixar o vídeo em `.mp4` direto para `input/`. O sistema busca automaticamente o `yt-dlp.exe` no `PATH` ou na instalação local do **YtoWave** (`ytowave/bin/yt-dlp.exe`). Caso não encontre, a interface exibe um botão direto para a página de download do YtoWave.
 
 ---
 

@@ -253,6 +253,7 @@ class FacecamDetector:
         end: float | None = None,
         layout_mode: str = "auto",
         num_samples: int = 12,
+        face_target: str = "auto",
     ) -> FaceCropResult:
         """Analyze frames in [start, end] to locate stationary streamer facecam."""
         vpath = Path(video_path)
@@ -365,6 +366,23 @@ class FacecamDetector:
             clusters.sort(key=_cluster_rank, reverse=True)
             best_cluster = clusters[0]
             min_hits = max(2, int(len(times) * 0.25))
+
+            if face_target in ("left", "right") and len(clusters) > 1:
+                valid_clusters = [c for c in clusters if len(c) >= min_hits] or [best_cluster]
+                # Filter to clusters near the primary webcam corner
+                ref_x = float(np.median([d[0] for d in best_cluster]))
+                ref_y = float(np.median([d[1] for d in best_cluster]))
+                nearby = [
+                    c for c in valid_clusters
+                    if abs(float(np.median([d[1] for d in c])) - ref_y) <= 0.16
+                    and abs(float(np.median([d[0] for d in c])) - ref_x) <= 0.25
+                ]
+                if nearby:
+                    best_cluster = (
+                        max(nearby, key=lambda c: float(np.median([d[0] for d in c])))
+                        if face_target == "right"
+                        else min(nearby, key=lambda c: float(np.median([d[0] for d in c])))
+                    )
 
             if len(best_cluster) < min_hits:
                 return FaceCropResult(

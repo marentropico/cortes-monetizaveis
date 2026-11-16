@@ -51,6 +51,7 @@ from src.youtube_analytics import (
     save_youtube_api_config,
     scrape_studio_analytics_cdp,
 )
+from src.youtube_downloader import download_youtube_video, get_downloader_status
 from src.youtube_publisher import (
     QUEUE_FILE as YT_QUEUE_FILE,
     check_youtube_studio_ready,
@@ -259,6 +260,11 @@ app.add_middleware(
 class DemoVideoRequest(BaseModel):
     language: str = "pt"
     duration: int = 36
+
+
+class DownloadUrlRequest(BaseModel):
+    url: str
+    quality: str = "1080p"
 
 
 class CutsUpdateRequest(BaseModel):
@@ -611,6 +617,41 @@ def api_generate_demo(req: DemoVideoRequest) -> dict[str, Any]:
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/videos/downloader-status")
+def api_downloader_status() -> dict[str, Any]:
+    return get_downloader_status()
+
+
+@app.post("/api/videos/download-url")
+def api_download_youtube_url(req: DownloadUrlRequest) -> dict[str, Any]:
+    status = get_downloader_status()
+    if not status["available"]:
+        raise HTTPException(
+            status_code=412,
+            detail="yt-dlp.exe não encontrado. Instale o YtoWave e reabra o aplicativo.",
+        )
+    if not req.url.strip():
+        raise HTTPException(status_code=400, detail="Informe o link do vídeo do YouTube.")
+
+    job_id = jobs.create("download", "Download YouTube → input/")
+
+    def _worker() -> None:
+        emit: Callable[[str], None] = lambda msg: jobs.append_log(job_id, msg)
+        try:
+            jobs.set_step(job_id, "download", 5)
+            out_path = download_youtube_video(
+                url=req.url,
+                quality=req.quality,
+                progress_callback=emit,
+            )
+            jobs.finish(job_id, {"downloaded_filename": out_path.name})
+        except Exception as exc:
+            jobs.fail(job_id, str(exc))
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"job_id": job_id}
 
 
 @app.delete("/api/videos/{filename}")

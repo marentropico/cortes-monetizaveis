@@ -2,6 +2,7 @@ import type {
   AnalyticsPayload,
   CutItem,
   DiagnosticsInfo,
+  DownloaderStatus,
   HealthInfo,
   InputVideo,
   JobState,
@@ -69,6 +70,15 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ language, duration }),
+    }),
+
+  downloaderStatus: () => request<DownloaderStatus>("/api/videos/downloader-status"),
+
+  downloadYoutubeUrl: (url: string, quality: string) =>
+    request<{ job_id: string }>("/api/videos/download-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, quality }),
     }),
 
   deleteVideo: (filename: string) =>
