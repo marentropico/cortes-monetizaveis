@@ -274,12 +274,79 @@ def _build_time_windows(
     return windows or [segments]
 
 
+def _strip_shorts_hashtag(text: str) -> str:
+    """Remove any #shorts / #short tag (case-insensitive) and normalize whitespace."""
+    cleaned = re.sub(r"(?i)(?:^|\s)#shorts?\b", "", text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+
+def _to_hashtag(term: str) -> str:
+    """Convert a keyword phrase into a valid #Hashtag (ASCII/alphanumeric)."""
+    ascii_term = re.sub(r"[^A-Za-z0-9À-ÿ]+", "", term.strip())
+    if not ascii_term or ascii_term.lower() in ("short", "shorts"):
+        return ""
+    return f"#{ascii_term[:32]}"
+
+
+def _ensure_contextual_hashtags(
+    title: str,
+    desc: str,
+    kw_list: list[str],
+    meta_title: str,
+    cut_title: str,
+) -> tuple[str, str]:
+    """Enforce no-#shorts rule and guarantee contextual hashtags from keywords/video."""
+    clean_title = _strip_shorts_hashtag(title)
+    clean_desc = _strip_shorts_hashtag(desc)
+
+    candidate_tags: list[str] = []
+    for kw in kw_list:
+        ht = _to_hashtag(kw)
+        if ht and ht.lower() not in [t.lower() for t in candidate_tags]:
+            candidate_tags.append(ht)
+
+    if not candidate_tags:
+        for src_text in (meta_title, cut_title):
+            for tok in re.findall(r"[A-Za-zÀ-ÿ0-9]{4,}", src_text):
+                if tok.lower() in ("video", "corte", "cortes", "shorts", "short", "para", "como", "isso"):
+                    continue
+                ht = _to_hashtag(tok)
+                if ht and ht.lower() not in [t.lower() for t in candidate_tags]:
+                    candidate_tags.append(ht)
+                if len(candidate_tags) >= 3:
+                    break
+            if len(candidate_tags) >= 3:
+                break
+
+    if not candidate_tags:
+        candidate_tags = ["#Cortes", "#Viral"]
+
+    # Ensure title has at least one contextual hashtag (never #shorts) if room allows
+    if "#" not in clean_title:
+        tag = candidate_tags[0]
+        if len(clean_title) + len(tag) + 1 <= 100:
+            clean_title = f"{clean_title} {tag}".strip()
+
+    # Ensure description includes user keyword hashtags and at least one contextual hashtag
+    existing_tags_lower = {t.lower() for t in re.findall(r"#[A-Za-zÀ-ÿ0-9_]+", clean_desc)}
+    missing_tags = [t for t in candidate_tags[:5] if t.lower() not in existing_tags_lower]
+    if missing_tags:
+        sep = "\n\n" if clean_desc and not clean_desc.endswith("\n") else ""
+        clean_desc = f"{clean_desc}{sep}{' '.join(missing_tags)}".strip()
+    elif not existing_tags_lower:
+        sep = "\n\n" if clean_desc and not clean_desc.endswith("\n") else ""
+        clean_desc = f"{clean_desc}{sep}{' '.join(candidate_tags[:3])}".strip()
+
+    return clean_title[:100], clean_desc[:4000]
+
+
 def select_cuts_with_pool(
     transcript_data: dict[str, Any],
     duration_mode: str = "60s",
     max_cuts: int = 0,
     distribute_across_video: bool = True,
     video_path: str | Path | None = None,
+    keywords: str = "",
 ) -> tuple[list[dict[str, Any]], str]:
     """Use the Gemini/OpenRouter pool to curate high-retention viral cuts from transcript.json."""
     segments = [s for s in transcript_data.get("segments", []) if str(s.get("text", "")).strip()]
@@ -299,11 +366,18 @@ def select_cuts_with_pool(
     thumb_b64 = video_meta.get("thumb_b64")
 
     duration_rules = {
-        "30s": "Todos os cortes devem ter entre 22 e 35 segundos (duration_type='30s').",
-        "60s": "Todos os cortes devem ter entre 45 e 65 segundos (duration_type='60s').",
-        "90s": "Todos os cortes devem ter entre 72 e 95 segundos (duration_type='90s').",
-        "mix": "Misture de forma equilibrada cortes de '30s' (22-35s), '60s' (45-65s) e '90s' (72-95s) conforme o arco natural de cada momento.",
-    }.get(duration_mode, "Todos os cortes devem ter entre 45 e 65 segundos (duration_type='60s').")
+        "30s": "Todos os cortes devem ter entre 22 e 35 segundos (duration_type='30s'). NUNCA ultrapasse 35s.",
+        "60s": "Todos os cortes devem ter entre 45 e 65 segundos (duration_type='60s'). NUNCA ultrapasse 65s.",
+        "90s": "Todos os cortes devem ter entre 72 e 90 segundos (duration_type='90s'). NUNCA ultrapasse 90s.",
+        "mix": "Misture de forma equilibrada cortes de '30s' (22-35s), '60s' (45-65s) e '90s' (72-90s) conforme o arco natural de cada momento. NUNCA ultrapasse 90s.",
+    }.get(duration_mode, "Todos os cortes devem ter entre 45 e 65 segundos (duration_type='60s'). NUNCA ultrapasse 65s.")
+
+    kw_list = [k.strip() for k in str(keywords or "").split(",") if k.strip()]
+    kw_rule = (
+        f"\nPALAVRAS-CHAVE DA REMESSA (OBRIGATÓRIO usar nos títulos, descrições e hashtags): {', '.join(kw_list)}"
+        if kw_list
+        else ""
+    )
 
     dist_rule = (
         "Distribua os cortes por TODO o vídeo (início, meio e fim), sem concentrar tudo em um só trecho."
@@ -374,7 +448,7 @@ Arquivo: {video_file} | Idioma: {lang}
 Janela analisada: {win_start:.1f}s até {win_end:.1f}s (Duração total do vídeo: {total_duration:.1f}s){visual_note}
 Quantidade desejada: {qty_rule}
 Regra de duração: {duration_rules}
-Distribuição: {dist_rule}
+Distribuição: {dist_rule}{kw_rule}
 
 Retorne uma lista JSON onde cada item represente uma decisão da sala e tenha EXATAMENTE estas chaves (nesta ordem):
 - "id": inteiro sequencial (1, 2, ...)
@@ -387,8 +461,8 @@ Retorne uma lista JSON onde cada item represente uma decisão da sala e tenha EX
 - "duration_type": "30s", "60s" ou "90s"
 - "hook_text": frase curta e explosiva em MAIÚSCULAS criada pelo Comediante + Jovem Viral (máx. 6 palavras, SEM hashtags, ex: "NINGUÉM ESPERAVA ESSE FINAL!")
 - "context_reason": 1 frase natural resumindo o consenso da sala sobre por que esse corte viraliza (sem termos técnicos)
-- "youtube_title": título altamente clicável com curiosidade/humor + 1 emoji + #shorts (máx. 90 caracteres)
-- "youtube_description": 1-2 frases envolventes + 3-5 hashtags de nicho relevantes ao conteúdo real (nunca escreva 'corte automático')
+- "youtube_title": título altamente clicável com curiosidade/humor + 1 emoji + 1 hashtag contextual do tema/palavras-chave (máx. 90 caracteres). REGRA ABSOLUTA: NUNCA use #shorts!
+- "youtube_description": 1-2 frases envolventes incorporando as palavras-chave + 3-5 hashtags de nicho relevantes ao vídeo/corte (OBRIGATÓRIO incluir hashtags contextuais; PROIBIDO usar #shorts e nunca escreva 'corte automático')
 
 TRANSCRIÇÃO:
 {transcript_block}
@@ -434,12 +508,26 @@ TRANSCRIÇÃO:
     # Prioritize highest consensus_score when resolving overlaps across 60s window boundaries
     all_raw.sort(key=lambda r: float(r.get("consensus_score", 7.5)) if isinstance(r, dict) else 0.0, reverse=True)
 
+    max_allowed_dur = {"30s": 36.0, "60s": 66.0, "90s": 90.0, "mix": 90.0}.get(duration_mode, 90.0)
     clean_cuts: list[dict[str, Any]] = []
     for raw in all_raw:
         try:
             c_start = max(0.0, round(float(raw["start"]), 2))
             c_end = min(total_duration, round(float(raw["end"]), 2))
             c_start, c_end = _snap_to_segment_boundaries(c_start, c_end, segments, total_duration)
+            if c_end - c_start > max_allowed_dur:
+                # Trim back to the last clean segment boundary within max_allowed_dur
+                ceiling = c_start + max_allowed_dur
+                fit_ends = [
+                    float(s["end"])
+                    for s in segments
+                    if float(s.get("end", 0.0)) >= c_start + 15.0 and float(s.get("end", 0.0)) <= ceiling
+                ]
+                c_end = min(total_duration, round(max(fit_ends) + 0.2, 2)) if fit_ends else min(total_duration, round(ceiling, 2))
+                if c_end - c_start > max_allowed_dur:
+                    c_end = min(total_duration, round(c_start + max_allowed_dur, 2))
+            if c_end - c_start > 90.0:
+                c_end = min(total_duration, round(c_start + 90.0, 2))
             if c_end - c_start < 10.0:
                 continue
             score = float(raw.get("consensus_score", 8.0))
@@ -458,6 +546,14 @@ TRANSCRIÇÃO:
             if not title.endswith(("_30s", "_60s", "_90s")):
                 title = f"{title}_{dtype}"
 
+            yt_title, yt_desc = _ensure_contextual_hashtags(
+                str(raw.get("youtube_title", "")).strip(),
+                str(raw.get("youtube_description", "")).strip(),
+                kw_list=kw_list,
+                meta_title=meta_title,
+                cut_title=title,
+            )
+
             clean_cuts.append(
                 {
                     "id": len(clean_cuts) + 1,
@@ -467,8 +563,8 @@ TRANSCRIÇÃO:
                     "duration_type": dtype,
                     "hook_text": str(raw.get("hook_text", "OLHA ISSO!")).strip().upper()[:60],
                     "context_reason": str(raw.get("context_reason", "")).strip(),
-                    "youtube_title": str(raw.get("youtube_title", "")).strip()[:100],
-                    "youtube_description": str(raw.get("youtube_description", "")).strip()[:4000],
+                    "youtube_title": yt_title,
+                    "youtube_description": yt_desc,
                 }
             )
             if max_cuts > 0 and len(clean_cuts) >= max_cuts:

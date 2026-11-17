@@ -82,6 +82,7 @@ export function StudioTab({
   const [refineCaptions, setRefineCaptions] = useState(true);
   const [dynamicFaceTracking, setDynamicFaceTracking] = useState(true);
   const [faceTrackMode, setFaceTrackMode] = useState<"pinned" | "quick_detect">("pinned");
+  const [keywords, setKeywords] = useState("");
 
   // Streamer Face Pin
   const [pinnedStatus, setPinnedStatus] = useState<PinnedFaceStatus | null>(null);
@@ -251,6 +252,7 @@ export function StudioTab({
         refine_captions_with_llm: refineCaptions,
         dynamic_face_tracking: dynamicFaceTracking,
         face_track_mode: faceTrackMode,
+        keywords,
       });
       onStartJob(job_id);
     } catch (err) {
@@ -596,6 +598,19 @@ export function StudioTab({
                   />
                 </div>
               </div>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs text-slate-400">
+                Palavras-chave da Remessa (separadas por vírgula — usadas em títulos, descrições e hashtags, sem #shorts)
+              </label>
+              <input
+                type="text"
+                value={keywords}
+                onChange={(e) => setKeywords(e.target.value)}
+                placeholder="ex: Cariani, GTA RP, Paulinho o Loko, Podpah"
+                className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500"
+              />
             </div>
 
             <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-300">

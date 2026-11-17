@@ -146,11 +146,13 @@ def _save_uploaded_history(history: dict[str, dict[str, Any]]) -> None:
 
 
 def build_viral_metadata(cut: dict[str, Any], source_video: str = "") -> dict[str, str]:
-    """Build YouTube Shorts title (<=100 chars) and SEO description with hashtags."""
+    """Build YouTube title (<=100 chars) and SEO description with contextual hashtags (never #shorts)."""
     if cut.get("youtube_title") and cut.get("youtube_description"):
+        yt_t = re.sub(r"(?i)(?:^|\s)#shorts?\b", "", str(cut["youtube_title"])).strip()
+        yt_d = re.sub(r"(?i)(?:^|\s)#shorts?\b", "", str(cut["youtube_description"])).strip()
         return {
-            "youtube_title": str(cut["youtube_title"])[:100],
-            "youtube_description": str(cut["youtube_description"])[:5000],
+            "youtube_title": yt_t[:100],
+            "youtube_description": yt_d[:5000],
         }
 
     cut_id = int(cut.get("id", 0))
@@ -159,33 +161,52 @@ def build_viral_metadata(cut: dict[str, Any], source_video: str = "") -> dict[st
     reason = re.sub(r"\s*(?:—|\|)\s*(?:Corte\s*\d+s|Score.*).*$", "", reason, flags=re.IGNORECASE).strip()
     raw_title = str(cut.get("title", f"Corte_{cut_id}")).replace("_", " ").strip()
 
+    kw_raw = str(cut.get("keywords", "") or "").strip()
+    kw_tags: list[str] = []
+    for kw in kw_raw.split(","):
+        cleaned_kw = re.sub(r"[^A-Za-z0-9À-ÿ]+", "", kw.strip())
+        if cleaned_kw and cleaned_kw.lower() not in ("short", "shorts"):
+            ht = f"#{cleaned_kw[:32]}"
+            if ht.lower() not in [t.lower() for t in kw_tags]:
+                kw_tags.append(ht)
+
     is_zelda = "zelda" in source_video.lower() or "ganondorf" in source_video.lower()
     game_label = "The Legend of Zelda: Ocarina of Time Remake" if is_zelda else (
-        Path(source_video).stem if source_video else "Gameplay"
+        Path(source_video).stem.replace("_", " ") if source_video else "Gameplay"
     )
-    hashtags = (
-        "#shorts #zelda #ocarinaoftime #gameplay #alanzoka #cortes #nintendo"
-        if is_zelda
-        else "#shorts #gameplay #gaming #cortes #clips"
-    )
+    if kw_tags:
+        hashtags = " ".join(kw_tags[:6])
+        primary_tag = kw_tags[0]
+    elif is_zelda:
+        hashtags = "#zelda #ocarinaoftime #gameplay #alanzoka #cortes #nintendo"
+        primary_tag = "#zelda"
+    else:
+        stem_tokens = [
+            f"#{tok[:28]}"
+            for tok in re.findall(r"[A-Za-zÀ-ÿ0-9]{4,}", Path(source_video).stem if source_video else raw_title)
+            if tok.lower() not in ("video", "corte", "cortes", "short", "shorts")
+        ][:3]
+        base_tags = stem_tokens or ["#gameplay", "#cortes"]
+        hashtags = " ".join(dict.fromkeys([*base_tags, "#cortes", "#viral"]))
+        primary_tag = base_tags[0]
 
     if cut_id in CURATED_TITLES_BY_ID:
-        yt_title = CURATED_TITLES_BY_ID[cut_id]
+        yt_title = re.sub(r"(?i)(?:^|\s)#shorts?\b", "", CURATED_TITLES_BY_ID[cut_id]).strip()
     else:
         base = hook if hook else raw_title.upper()
-        suffix = " #shorts #zelda" if is_zelda else " #shorts"
+        suffix = f" {primary_tag}"
         max_base = 100 - len(suffix)
         yt_title = (base[:max_base].rstrip() + suffix)[:100]
 
     source_credit = (
         "Trecho cortado da gameplay da Live do Alanzoka"
         if is_zelda
-        else "Trecho cortado da gameplay"
+        else f"Trecho retirado de: {game_label}"
     )
     yt_desc = (
         f"{hook or raw_title}\n\n"
         f"{reason}\n\n"
-        f"🎮 Jogo: {game_label}\n"
+        f"🎬 Conteúdo: {game_label}\n"
         f"{source_credit}\n\n"
         f"{hashtags}"
     ).strip()

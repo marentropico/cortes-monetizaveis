@@ -327,6 +327,7 @@ class PipelineRunRequest(BaseModel):
     refine_captions_with_llm: bool = True
     dynamic_face_tracking: bool = True
     face_track_mode: str = "pinned"  # pinned | quick_detect
+    keywords: str = ""
 
 
 class QueueItemUpdateRequest(BaseModel):
@@ -952,6 +953,7 @@ def api_run_pipeline(req: PipelineRunRequest) -> dict[str, Any]:
                         distribute_across_video=bool(req.distribute_across_video),
                         use_llm_pool=bool(req.use_llm_pool),
                         progress_callback=emit,
+                        keywords=req.keywords,
                     )
                     emit(f"✂️ {len(cuts)} corte(s) selecionados em temp/cuts.json.")
 

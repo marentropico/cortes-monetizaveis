@@ -18,7 +18,7 @@ from src import TEMP_DIR
 DURATION_CONFIGS: dict[str, tuple[float, float, float]] = {
     "30s": (22.0, 30.0, 35.0),
     "60s": (45.0, 60.0, 66.0),
-    "90s": (72.0, 90.0, 95.0),
+    "90s": (72.0, 90.0, 90.0),
 }
 
 STOPWORDS_PT_EN = {
@@ -456,6 +456,7 @@ def analyze_transcript_for_cuts(
     distribute_across_video: bool = True,
     use_llm_pool: bool = True,
     progress_callback: Any | None = None,
+    keywords: str = "",
 ) -> list[dict[str, Any]]:
     """Generate contextual cuts (30s, 60s, 90s, or mix) into temp/cuts.json."""
     t_path = Path(transcript_path or (TEMP_DIR / "transcript.json"))
@@ -494,6 +495,7 @@ def analyze_transcript_for_cuts(
                     max_cuts=max_cuts,
                     distribute_across_video=distribute_across_video,
                     video_path=data.get("video_path"),
+                    keywords=keywords,
                 )
                 out_file = Path(output_path or (TEMP_DIR / "cuts.json"))
                 out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -572,11 +574,20 @@ def analyze_transcript_for_cuts(
                 "duration_type": dtype,
                 "hook_text": item["hook_text"],
                 "context_reason": reason_str,
+                **({"keywords": keywords} if keywords.strip() else {}),
             }
         )
 
     out_file = Path(output_path or (TEMP_DIR / "cuts.json"))
     out_file.parent.mkdir(parents=True, exist_ok=True)
+    hard_cap = {"30s": 36.0, "60s": 66.0}.get(mode, 90.0)
+    for cut in cuts_json:
+        s_t = float(cut["start"])
+        e_t = float(cut["end"])
+        if e_t - s_t > hard_cap:
+            cut["end"] = round(s_t + hard_cap, 2)
+        if float(cut["end"]) - s_t > 90.0:
+            cut["end"] = round(s_t + 90.0, 2)
     out_file.write_text(json.dumps(cuts_json, ensure_ascii=False, indent=2), encoding="utf-8")
     return cuts_json
 
