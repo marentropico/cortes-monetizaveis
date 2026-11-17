@@ -37,6 +37,7 @@ remotion/.agents/
 remotion/props_cut_*.json
 
 # Logs & OS Files
+/package-lock.json
 *.log
 npm-debug.log*
 .DS_Store
