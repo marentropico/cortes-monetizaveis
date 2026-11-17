@@ -129,12 +129,6 @@ def download_youtube_video(
         "--write-thumbnail",
         "--convert-thumbnails",
         "jpg",
-        "--write-subs",
-        "--write-auto-subs",
-        "--sub-format",
-        "json3",
-        "--sub-langs",
-        "pt,pt-BR,en",
         "--ffmpeg-location",
         str(Path(ffmpeg_path).parent),
         "-o",
@@ -225,9 +219,70 @@ def download_youtube_video(
                 shutil.move(str(thumb_src), str(dst_thumb))
                 break
 
-        # Move YouTube .json3 subtitles (prefer pt / pt-BR over en) and remove leftover .json3 in input/
-        sub_candidates = sorted(final_path.parent.glob(f"{final_path.stem}*.json3"))
-        if sub_candidates:
+        # Best-effort non-fatal fetch of YouTube .json3 subtitles into proj_dir
+        # (kept separate from main download so HTTP 429 on subtitles never fails the video)
+        _fetch_youtube_json3_subtitles(
+            yt_dlp=yt_dlp,
+            clean_url=clean_url,
+            proj_dir=proj_dir,
+            creation_flags=creation_flags,
+            progress_callback=progress_callback,
+        )
+    except Exception:
+        pass
+
+    if progress_callback:
+        progress_callback(f"✅ Vídeo salvo em input/: {final_path.name}")
+
+    return final_path
+
+
+def _fetch_youtube_json3_subtitles(
+    yt_dlp: str,
+    clean_url: str,
+    proj_dir: Path,
+    creation_flags: int,
+    progress_callback: Callable[[str], None] | None = None,
+) -> Path | None:
+    """Best-effort, non-fatal download of YouTube .json3 subtitles (avoids failing video on HTTP 429)."""
+    out_sub_tmpl = str(proj_dir / "yt_sub")
+    for lang_group in ("pt-BR,pt", "en"):
+        sub_cmd = [
+            yt_dlp,
+            "--no-playlist",
+            "--skip-download",
+            "--ignore-errors",
+            "--write-subs",
+            "--write-auto-subs",
+            "--sub-format",
+            "json3",
+            "--sub-langs",
+            lang_group,
+            "--sleep-subtitles",
+            "2",
+            "-o",
+            out_sub_tmpl,
+        ]
+        if shutil.which("node"):
+            sub_cmd.extend(["--js-runtimes", "node"])
+        sub_cmd.append(clean_url)
+
+        try:
+            subprocess.run(
+                sub_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=45,
+                creationflags=creation_flags,
+                check=False,
+            )
+        except Exception:
+            continue
+
+        candidates = sorted(proj_dir.glob("yt_sub*.json3"))
+        if candidates:
             def _sub_priority(p: Path) -> tuple[int, str]:
                 lower = p.name.lower()
                 if ".pt-br." in lower:
@@ -238,19 +293,18 @@ def download_youtube_video(
                     return (2, lower)
                 return (3, lower)
 
-            sub_candidates.sort(key=_sub_priority)
-            best_sub = sub_candidates[0]
+            candidates.sort(key=_sub_priority)
+            best = candidates[0]
             dst_sub = proj_dir / "youtube_subs.json3"
             if dst_sub.exists():
                 dst_sub.unlink()
-            shutil.move(str(best_sub), str(dst_sub))
-            for leftover in sub_candidates[1:]:
-                if leftover.is_file():
-                    leftover.unlink(missing_ok=True)
-    except Exception:
-        pass
+            shutil.move(str(best), str(dst_sub))
+            for leftover in candidates[1:]:
+                leftover.unlink(missing_ok=True)
+            if progress_callback:
+                progress_callback(f"📝 Legenda YouTube (.json3) salva ({best.name}).")
+            return dst_sub
 
     if progress_callback:
-        progress_callback(f"✅ Vídeo salvo em input/: {final_path.name}")
-
-    return final_path
+        progress_callback("⚠️ Legenda .json3 indisponível/limitada no YouTube (429); Whisper local será usado na transcrição.")
+    return None

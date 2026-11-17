@@ -109,7 +109,7 @@ def _media_url_for_temp(path_str: str | Path) -> str:
 
 class JobManager:
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._jobs: dict[str, dict[str, Any]] = {}
         self._current_job_id: str | None = None
         self._active_by_kind: dict[str, str] = {}
