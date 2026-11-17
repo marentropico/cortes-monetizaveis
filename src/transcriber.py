@@ -48,6 +48,137 @@ def _fmt_mmss(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
 
 
+def _build_smart_initial_prompt(vpath: Path, norm_lang: str | None) -> str | None:
+    """Build Whisper initial_prompt using video_meta.json (title/channel/tags) and recursive channel glossary."""
+    parts: list[str] = []
+
+    meta_path = PROJECTS_TEMP_DIR / vpath.stem / "video_meta.json"
+    title = ""
+    channel = ""
+    tags: list[str] = []
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            title = str(meta.get("title") or "").strip()
+            channel = str(meta.get("channel") or meta.get("uploader") or "").strip()
+            raw_tags = meta.get("tags") or []
+            if isinstance(raw_tags, list):
+                tags = [str(t).strip() for t in raw_tags if str(t).strip()][:8]
+        except Exception:
+            pass
+
+    if not title:
+        title = " ".join(vpath.stem.replace("_", " ").replace("-", " ").split())[:90]
+
+    if title:
+        parts.append(f"Vídeo: {title[:90]}.")
+    if channel:
+        parts.append(f"Canal: {channel[:40]}.")
+    if tags:
+        parts.append(f"Termos: {', '.join(tags)[:100]}.")
+
+    glossary_path = TEMP_DIR / "channel_glossary.json"
+    if glossary_path.is_file():
+        try:
+            gdata = json.loads(glossary_path.read_text(encoding="utf-8"))
+            terms = gdata.get("terms", []) if isinstance(gdata, dict) else (gdata if isinstance(gdata, list) else [])
+            clean_terms = [str(t).strip() for t in terms if str(t).strip()][-20:]
+            if clean_terms:
+                parts.append(f"Glossário: {', '.join(clean_terms)[:120]}.")
+        except Exception:
+            pass
+
+    base_prompt = PROMPTS_BY_LANGUAGE.get(norm_lang or "", "")
+    if base_prompt:
+        parts.append(base_prompt)
+
+    prompt = " ".join(parts).strip()
+    return prompt[:420] if prompt else None
+
+
+def _parse_youtube_json3(json3_path: Path, duration: float = 0.0) -> list[dict[str, Any]]:
+    """Parse YouTube .json3 subtitle file into Whisper-compatible segments + word timestamps."""
+    data = json.loads(json3_path.read_text(encoding="utf-8"))
+    events = data.get("events", [])
+    if not isinstance(events, list):
+        return []
+
+    segments: list[dict[str, Any]] = []
+    for ev in events:
+        if not isinstance(ev, dict) or not ev.get("segs"):
+            continue
+        t_start_ms = int(ev.get("tStartMs", 0) or 0)
+        d_dur_ms = int(ev.get("dDurationMs", 0) or 0)
+        seg_start = max(0.0, round(t_start_ms / 1000.0, 3))
+        if duration > 0 and seg_start >= duration:
+            continue
+
+        raw_words: list[tuple[str, float]] = []
+        text_parts: list[str] = []
+        for seg in ev["segs"]:
+            if not isinstance(seg, dict):
+                continue
+            chunk = str(seg.get("utf8", "")).replace("\n", " ")
+            if not chunk.strip():
+                continue
+            text_parts.append(chunk)
+            offset_ms = int(seg.get("tOffsetMs", 0) or 0)
+            w_start = max(seg_start, round((t_start_ms + offset_ms) / 1000.0, 3))
+            for tok in chunk.split():
+                raw_words.append((tok, w_start))
+
+        full_text = " ".join("".join(text_parts).split()).strip()
+        if not full_text or not raw_words:
+            continue
+
+        # Deduplicate consecutive identical rolling caption lines
+        if segments and segments[-1]["text"] == full_text and abs(seg_start - segments[-1]["start"]) < 1.0:
+            continue
+
+        seg_end = round((t_start_ms + max(d_dur_ms, 300)) / 1000.0, 3)
+        if duration > 0:
+            seg_end = min(round(duration, 3), seg_end)
+        if seg_end <= seg_start:
+            seg_end = round(seg_start + 0.3, 3)
+
+        # Clamp previous segment end if YouTube rolling captions overlap
+        if segments and segments[-1]["end"] > seg_start:
+            clamped_prev = max(round(segments[-1]["start"] + 0.1, 3), seg_start)
+            segments[-1]["end"] = clamped_prev
+            if segments[-1]["words"]:
+                segments[-1]["words"][-1]["end"] = max(
+                    round(segments[-1]["words"][-1]["start"] + 0.04, 3),
+                    clamped_prev,
+                )
+
+        words: list[dict[str, Any]] = []
+        for idx, (tok, w_start) in enumerate(raw_words):
+            if idx + 1 < len(raw_words):
+                next_start = raw_words[idx + 1][1]
+                w_end = max(round(w_start + 0.04, 3), next_start)
+            else:
+                w_end = max(round(w_start + 0.04, 3), seg_end)
+            words.append(
+                {
+                    "word": tok,
+                    "start": w_start,
+                    "end": min(seg_end, w_end) if seg_end > w_start else w_end,
+                    "probability": 1.0,
+                }
+            )
+
+        segments.append(
+            {
+                "start": seg_start,
+                "end": seg_end,
+                "text": full_text,
+                "words": words,
+            }
+        )
+
+    return segments
+
+
 def _stabilize_words(raw_words: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Ensure monotonic, non-overlapping word timestamps and filter ASR stutter loops."""
     cleaned: list[dict[str, Any]] = []
@@ -183,7 +314,8 @@ class GameplayTranscriber:
         if self._model is None:
             from faster_whisper import WhisperModel
 
-            cpu_threads = os.cpu_count() or 4
+            # Match physical cores (avoids SMT contention & thermal throttling on CPU)
+            cpu_threads = min(8, max(2, (os.cpu_count() or 4) // 2))
             self._model = WhisperModel(
                 self.model_size,
                 device=self.device,
@@ -212,6 +344,8 @@ class GameplayTranscriber:
             "1",
             "-ar",
             "16000",
+            "-af",
+            "highpass=f=120,lowpass=f=4500,dynaudnorm=f=150:g=15",
             "-c:a",
             "pcm_s16le",
             str(wav_path),
@@ -291,6 +425,36 @@ class GameplayTranscriber:
             active_json.write_text(payload_str, encoding="utf-8")
             return empty_payload
 
+        # Fast-path Passada 1: use YouTube .json3 subtitles when available (avoids local Whisper Passada 1)
+        json3_path = project_dir / "youtube_subs.json3"
+        if json3_path.is_file():
+            try:
+                if progress_callback:
+                    progress_callback("Lendo legenda oficial/automática do YouTube (.json3)...")
+                yt_segments = _parse_youtube_json3(json3_path, float(video_info.get("duration", 0.0) or 0.0))
+                if yt_segments:
+                    yt_payload = {
+                        "video_file": vpath.name,
+                        "video_path": str(vpath),
+                        "language": norm_lang or "pt",
+                        "requested_language": norm_lang,
+                        "language_probability": 1.0,
+                        "duration": video_info.get("duration", 0.0),
+                        "model_size": "youtube-json3",
+                        "source_size": source_size,
+                        "source_mtime": source_mtime,
+                        "segments": yt_segments,
+                    }
+                    yt_str = json.dumps(yt_payload, ensure_ascii=False, indent=2)
+                    cached_json.write_text(yt_str, encoding="utf-8")
+                    active_json.write_text(yt_str, encoding="utf-8")
+                    if progress_callback:
+                        progress_callback(f"Transcrição carregada via YouTube (.json3): {len(yt_segments)} segmentos.")
+                    return yt_payload
+            except Exception as exc:
+                if progress_callback:
+                    progress_callback(f"Falha ao ler .json3 ({exc}); usando Whisper local...")
+
         wav_path = project_dir / "audio_16k.wav"
         wav_fresh = (
             wav_path.is_file()
@@ -311,12 +475,7 @@ class GameplayTranscriber:
             )
         model = self._get_model()
 
-        base_prompt = PROMPTS_BY_LANGUAGE.get(norm_lang or "", "")
-        clean_title = " ".join(vpath.stem.replace("_", " ").replace("-", " ").split())[:90]
-        if base_prompt:
-            initial_prompt = f"Vídeo: {clean_title}. {base_prompt}"[:260]
-        else:
-            initial_prompt = f"Vídeo: {clean_title}." if clean_title else None
+        initial_prompt = _build_smart_initial_prompt(vpath, norm_lang)
         if progress_callback:
             lang_label = norm_lang.upper() if norm_lang else "AUTO (PT/EN)"
             progress_callback(f"Transcrevendo áudio [{lang_label}] com alinhamento por palavra...")
@@ -340,7 +499,7 @@ class GameplayTranscriber:
                         language=norm_lang,
                         initial_prompt=initial_prompt,
                         beam_size=1,
-                        batch_size=8,
+                        batch_size=4,
                         repetition_penalty=1.18,
                         no_repeat_ngram_size=3,
                         word_timestamps=True,
@@ -352,13 +511,13 @@ class GameplayTranscriber:
                         audio_array,
                         language=norm_lang,
                         initial_prompt=initial_prompt,
-                        beam_size=5,
+                        beam_size=3,
                         repetition_penalty=1.18,
                         no_repeat_ngram_size=3,
                         word_timestamps=True,
                         vad_filter=True,
                         vad_parameters={"min_silence_duration_ms": 350, "speech_pad_ms": 150},
-                        condition_on_previous_text=True,
+                        condition_on_previous_text=False,
                     )
 
                 last_pct = -5.0
@@ -442,7 +601,7 @@ class GameplayTranscriber:
         language: str = "pt",
         audio_wav_path: str | Path | None = None,
     ) -> list[dict[str, Any]]:
-        """Passada 2: high-precision transcription (beam_size=5) on a single [start, end] clip slice."""
+        """Passada 2: high-precision transcription (beam_size=3) on a single [start, end] clip slice."""
         vpath = Path(video_path).resolve()
         project_dir = PROJECTS_TEMP_DIR / vpath.stem
         wav_path = Path(audio_wav_path) if audio_wav_path else (project_dir / "audio_16k.wav")
@@ -465,21 +624,19 @@ class GameplayTranscriber:
             return []
 
         norm_lang = normalize_language(language)
-        base_prompt = PROMPTS_BY_LANGUAGE.get(norm_lang or "", "")
-        clean_title = " ".join(vpath.stem.replace("_", " ").replace("-", " ").split())[:90]
-        initial_prompt = f"Vídeo: {clean_title}. {base_prompt}"[:260] if base_prompt else None
+        initial_prompt = _build_smart_initial_prompt(vpath, norm_lang)
 
         model = self._get_model()
         segments_iter, _ = model.transcribe(
             clip_audio,
             language=norm_lang,
             initial_prompt=initial_prompt,
-            beam_size=5,
+            beam_size=3,
             repetition_penalty=1.18,
             no_repeat_ngram_size=3,
             word_timestamps=True,
             vad_filter=False,
-            condition_on_previous_text=True,
+            condition_on_previous_text=False,
         )
 
         raw_segments: list[dict[str, Any]] = []

@@ -6,6 +6,8 @@ import type {
   HealthInfo,
   InputVideo,
   JobState,
+  PinFrameInfo,
+  PinnedFaceStatus,
   PresetOption,
   RenderedClip,
   ThumbnailItem,
@@ -86,6 +88,32 @@ export const api = {
       method: "DELETE",
     }),
 
+  getPinnedFace: (filename: string) =>
+    request<PinnedFaceStatus>(`/api/videos/${encodeURIComponent(filename)}/pinned-face`),
+
+  loadPinFrame: (filename: string, timestamp: number) =>
+    request<PinFrameInfo>(`/api/videos/${encodeURIComponent(filename)}/pin-frame`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timestamp }),
+    }),
+
+  pinFace: (filename: string, timestamp: number, norm_x: number, norm_y: number) =>
+    request<PinnedFaceStatus & { message: string }>(
+      `/api/videos/${encodeURIComponent(filename)}/pin-face`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ timestamp, norm_x, norm_y }),
+      }
+    ),
+
+  clearPinnedFace: (filename: string) =>
+    request<{ pinned: boolean; message: string }>(
+      `/api/videos/${encodeURIComponent(filename)}/pinned-face`,
+      { method: "DELETE" }
+    ),
+
   pipelineState: () =>
     request<{
       cuts: CutItem[];
@@ -114,7 +142,8 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  currentJob: () => request<{ job: JobState | null }>("/api/jobs/current"),
+  currentJob: () =>
+    request<{ job: JobState | null; jobs?: Record<string, JobState | null> }>("/api/jobs/current"),
 
   listClips: (source = "Todos", duration = "Todos") =>
     request<{ clips: RenderedClip[]; sources: string[] }>(

@@ -34,6 +34,12 @@ from src.captioner import CAPTION_PRESETS
 from src.context_analyzer import analyze_transcript_for_cuts
 from src.demo_generator import generate_demo_gameplay
 from src.face_detector import generate_layout_preview
+from src.face_tracker import (
+    clear_pinned_face,
+    extract_frame_for_pin,
+    get_pinned_face,
+    pin_face_from_frame,
+)
 from src.ffmpeg_utils import probe_video_info, verify_ffmpeg_capabilities
 from src.llm_pool import has_active_pool
 from src.thumbnail_generator import (
@@ -106,12 +112,21 @@ class JobManager:
         self._lock = threading.Lock()
         self._jobs: dict[str, dict[str, Any]] = {}
         self._current_job_id: str | None = None
+        self._active_by_kind: dict[str, str] = {}
 
     def get_current(self) -> dict[str, Any] | None:
         with self._lock:
             if not self._current_job_id:
                 return None
             return dict(self._jobs.get(self._current_job_id, {}))
+
+    def get_all_by_kind(self) -> dict[str, dict[str, Any] | None]:
+        with self._lock:
+            out: dict[str, dict[str, Any] | None] = {}
+            for kind, jid in self._active_by_kind.items():
+                j = self._jobs.get(jid)
+                out[kind] = dict(j) if j else None
+            return out
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -120,18 +135,18 @@ class JobManager:
 
     def is_running(self) -> bool:
         with self._lock:
-            if not self._current_job_id:
-                return False
-            j = self._jobs.get(self._current_job_id)
-            return bool(j and j.get("status") == "running")
+            for jid in self._active_by_kind.values():
+                j = self._jobs.get(jid)
+                if j and j.get("status") == "running":
+                    return True
+            return False
 
     def clear_current(self) -> None:
         with self._lock:
-            if self._current_job_id:
-                cur = self._jobs.get(self._current_job_id)
-                if cur and cur.get("status") == "running":
-                    return
+            if self.is_running():
+                return
             self._current_job_id = None
+            self._active_by_kind.clear()
 
     def create(
         self,
@@ -141,12 +156,13 @@ class JobManager:
         current_video: str | None = None,
     ) -> str:
         with self._lock:
-            if self._current_job_id:
-                cur = self._jobs.get(self._current_job_id)
+            existing_id = self._active_by_kind.get(kind)
+            if existing_id:
+                cur = self._jobs.get(existing_id)
                 if cur and cur.get("status") == "running":
                     raise HTTPException(
                         status_code=409,
-                        detail=f"Já existe uma tarefa em andamento: {cur.get('title')}",
+                        detail=f"Já existe uma tarefa '{kind}' em andamento: {cur.get('title')}",
                     )
             job_id = uuid.uuid4().hex[:12]
             self._jobs[job_id] = {
@@ -166,6 +182,7 @@ class JobManager:
                 "finished_at": None,
             }
             self._current_job_id = job_id
+            self._active_by_kind[kind] = job_id
             return job_id
 
     def set_queue_item(self, job_id: str, queue_index: int, current_video: str | None) -> None:
@@ -186,7 +203,7 @@ class JobManager:
             j["logs"].append(line)
             if len(j["logs"]) > 400:
                 j["logs"] = j["logs"][-400:]
-            m = re.search(r"(\d{1,3})%", message)
+            m = re.search(r"(\d{1,3})(?:\.\d+)?%", message)
             if m:
                 pct = min(99, max(0, int(m.group(1))))
                 if j["kind"] == "pipeline":
@@ -276,6 +293,16 @@ class LayoutPreviewRequest(BaseModel):
     layout_mode: str = "auto"
 
 
+class PinFrameRequest(BaseModel):
+    timestamp: float = 10.0
+
+
+class PinFaceRequest(BaseModel):
+    timestamp: float
+    norm_x: float
+    norm_y: float
+
+
 class ClearRecordsRequest(BaseModel):
     clear_input_caches: bool = False
 
@@ -298,6 +325,8 @@ class PipelineRunRequest(BaseModel):
     use_llm_pool: bool = True
     precision_retranscribe: bool = True
     refine_captions_with_llm: bool = True
+    dynamic_face_tracking: bool = True
+    face_track_mode: str = "pinned"  # pinned | quick_detect
 
 
 class QueueItemUpdateRequest(BaseModel):
@@ -331,8 +360,34 @@ class AnalyticsConfigRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+_shutdown_lock = threading.Lock()
+_shutdown_timer: threading.Timer | None = None
+
+
+def _cancel_scheduled_shutdown() -> None:
+    global _shutdown_timer
+    with _shutdown_lock:
+        if _shutdown_timer is not None:
+            _shutdown_timer.cancel()
+            _shutdown_timer = None
+
+
+def _execute_shutdown() -> None:
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+    os._exit(0)
+
+
 @app.get("/api/health")
 def api_health() -> dict[str, Any]:
+    _cancel_scheduled_shutdown()
     _ensure_dirs()
     try:
         caps = verify_ffmpeg_capabilities()
@@ -426,6 +481,25 @@ def api_diagnostics() -> dict[str, Any]:
     }
 
 
+@app.post("/api/system/heartbeat")
+def api_system_heartbeat() -> dict[str, bool]:
+    _cancel_scheduled_shutdown()
+    return {"ok": True}
+
+
+@app.post("/api/system/shutdown")
+def api_system_shutdown() -> dict[str, str]:
+    """Schedule graceful shutdown in 4s (cancelled automatically if UI reloads)."""
+    global _shutdown_timer
+    with _shutdown_lock:
+        if _shutdown_timer is not None:
+            _shutdown_timer.cancel()
+        _shutdown_timer = threading.Timer(4.0, _execute_shutdown)
+        _shutdown_timer.daemon = True
+        _shutdown_timer.start()
+    return {"message": "Shutdown agendado."}
+
+
 @app.post("/api/system/open-output")
 def api_open_output() -> dict[str, str]:
     _ensure_dirs()
@@ -473,7 +547,16 @@ def api_clear_records(req: ClearRecordsRequest | None = None) -> dict[str, Any]:
         jpath.write_text("[]", encoding="utf-8")
 
     removed_temp_files = 0
-    for pattern in ("transcript.json", "cuts.json", "layout_preview.jpg", "*.ass", "*.wav", "pip_circle_mask_*.png"):
+    for pattern in (
+        "transcript.json",
+        "cuts.json",
+        "layout_preview.jpg",
+        "pin_frame.jpg",
+        "track_cmds_*.txt",
+        "*.ass",
+        "*.wav",
+        "pip_circle_mask_*.png",
+    ):
         for f in TEMP_DIR.glob(pattern):
             if f.is_file():
                 f.unlink(missing_ok=True)
@@ -663,6 +746,69 @@ def api_delete_video(filename: str) -> dict[str, str]:
     return {"message": f"Vídeo '{target.name}' removido de input/."}
 
 
+@app.get("/api/videos/{filename}/pinned-face")
+def api_get_pinned_face(filename: str) -> dict[str, Any]:
+    target = _safe_child(INPUT_DIR, filename)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado.")
+    data = get_pinned_face(target)
+    if not data:
+        return {"pinned": False, "thumb_url": None, "timestamp": None}
+    thumb = data.get("thumb_path", "")
+    return {
+        "pinned": True,
+        "thumb_url": (_media_url_for_temp(thumb) + f"?t={int(time.time())}") if thumb else None,
+        "timestamp": data.get("timestamp"),
+    }
+
+
+@app.post("/api/videos/{filename}/pin-frame")
+def api_pin_frame(filename: str, req: PinFrameRequest) -> dict[str, Any]:
+    target = _safe_child(INPUT_DIR, filename)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado.")
+    try:
+        info = extract_frame_for_pin(target, timestamp=req.timestamp)
+        return {
+            "frame_url": _media_url_for_temp(info["frame_path"]) + f"?t={int(time.time() * 1000)}",
+            "timestamp": info["timestamp"],
+            "duration": info["duration"],
+            "width": info["width"],
+            "height": info["height"],
+            "faces": info["faces"],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/videos/{filename}/pin-face")
+def api_pin_face(filename: str, req: PinFaceRequest) -> dict[str, Any]:
+    target = _safe_child(INPUT_DIR, filename)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado.")
+    try:
+        saved = pin_face_from_frame(
+            target, timestamp=req.timestamp, norm_x=req.norm_x, norm_y=req.norm_y
+        )
+        return {
+            "pinned": True,
+            "thumb_url": _media_url_for_temp(saved["thumb_path"]) + f"?t={int(time.time() * 1000)}",
+            "timestamp": saved["timestamp"],
+            "message": f"Rosto pinnado em {saved['timestamp']}s! O circle crop seguirá esse rosto.",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/videos/{filename}/pinned-face")
+def api_clear_pinned_face(filename: str) -> dict[str, Any]:
+    target = _safe_child(INPUT_DIR, filename)
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado.")
+    clear_pinned_face(target)
+    return {"pinned": False, "message": "Pin do rosto removido."}
+
+
 # ---------------------------------------------------------------------------
 # Pipeline & Cuts
 # ---------------------------------------------------------------------------
@@ -844,6 +990,8 @@ def api_run_pipeline(req: PipelineRunRequest) -> dict[str, Any]:
                         skip_existing=bool(req.skip_existing),
                         precision_retranscribe=bool(req.precision_retranscribe),
                         refine_captions_with_llm=bool(req.refine_captions_with_llm),
+                        dynamic_face_tracking=bool(req.dynamic_face_tracking),
+                        face_track_mode=req.face_track_mode,
                     )
                     for r in records:
                         rendered_urls.append(
@@ -878,7 +1026,7 @@ def api_run_pipeline(req: PipelineRunRequest) -> dict[str, Any]:
 
 @app.get("/api/jobs/current")
 def api_current_job() -> dict[str, Any]:
-    return {"job": jobs.get_current()}
+    return {"job": jobs.get_current(), "jobs": jobs.get_all_by_kind()}
 
 
 @app.get("/api/jobs/{job_id}/stream")

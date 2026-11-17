@@ -493,6 +493,7 @@ def analyze_transcript_for_cuts(
                     duration_mode=mode,
                     max_cuts=max_cuts,
                     distribute_across_video=distribute_across_video,
+                    video_path=data.get("video_path"),
                 )
                 out_file = Path(output_path or (TEMP_DIR / "cuts.json"))
                 out_file.parent.mkdir(parents=True, exist_ok=True)

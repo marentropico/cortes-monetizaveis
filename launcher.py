@@ -67,6 +67,34 @@ def _open_standalone_window(url: str) -> subprocess.Popen[bytes] | None:
     return None
 
 
+def _free_port_if_busy(port: int) -> None:
+    """Terminate any stale backend/ffmpeg tree still listening on the target port."""
+    if os.name != "nt":
+        return
+    try:
+        out = subprocess.check_output(
+            ["netstat", "-ano", "-p", "TCP"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        pids: set[str] = set()
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and f":{port}" in parts[1] and parts[3] == "LISTENING":
+                pid = parts[4]
+                if pid.isdigit() and int(pid) > 0 and int(pid) != os.getpid():
+                    pids.add(pid)
+        for pid in pids:
+            print(f"[Studio] Encerrando instância anterior na porta {port} (PID {pid})...")
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", pid],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except Exception:
+        pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hard Cleeps Studio Standalone Launcher")
     parser.add_argument("--dev", action="store_true", help="Run Vite HMR dev server + FastAPI")
@@ -78,12 +106,37 @@ def main() -> None:
     env["PYTHONUTF8"] = "1"
 
     procs: list[subprocess.Popen[bytes]] = []
+
+    def _cleanup_all(*_args) -> None:
+        for p in procs:
+            if p.poll() is None:
+                try:
+                    if os.name == "nt":
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                    else:
+                        p.send_signal(signal.SIGTERM)
+                except Exception:
+                    pass
+
+    for sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            try:
+                signal.signal(sig, lambda *_a: (_cleanup_all(), sys.exit(0)))
+            except Exception:
+                pass
+
     try:
         if not args.dev and not DIST_DIR.is_dir():
             print("[Studio] Build do frontend não encontrado. Gerando build de produção...")
             npm_cmd = ["cmd", "/c", "npm", "run", "build"] if os.name == "nt" else ["npm", "run", "build"]
             subprocess.run(npm_cmd, cwd=str(FRONTEND_DIR), check=True)
 
+        _free_port_if_busy(args.port)
         print(f"[Studio] Iniciando Backend FastAPI na porta {args.port}...")
         backend_proc = subprocess.Popen(
             [py, "-m", "uvicorn", "backend.server:app", "--host", "127.0.0.1", "--port", str(args.port)],
@@ -110,22 +163,10 @@ def main() -> None:
         _open_standalone_window(target_url)
 
         backend_proc.wait()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
-        for p in procs:
-            if p.poll() is None:
-                try:
-                    if os.name == "nt":
-                        subprocess.run(
-                            ["taskkill", "/F", "/T", "/PID", str(p.pid)],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                        )
-                    else:
-                        p.send_signal(signal.SIGTERM)
-                except Exception:
-                    pass
+        _cleanup_all()
 
 
 if __name__ == "__main__":

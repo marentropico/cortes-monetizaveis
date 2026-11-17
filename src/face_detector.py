@@ -484,7 +484,6 @@ def generate_layout_preview(
         bot_roi = frame[gc["y"] : gc["y"] + gc["h"], gc["x"] : gc["x"] + gc["w"]]
         bot_img = cv2.resize(bot_roi, (1080, 1312), interpolation=cv2.INTER_AREA)
         canvas = np.vstack([top_img, bot_img])
-        cv2.rectangle(canvas, (0, 606), (1080, 610), (0, 230, 255), -1)
 
         # Circular facecam PiP straddling the split seam on the right
         pip_size = 340
@@ -511,8 +510,6 @@ def generate_layout_preview(
         top_img = cv2.resize(top_roi, (1080, 640), interpolation=cv2.INTER_AREA)
         bot_img = cv2.resize(bot_roi, (1080, 1280), interpolation=cv2.INTER_AREA)
         canvas = np.vstack([top_img, bot_img])
-        # Subtle neon divider bar
-        cv2.rectangle(canvas, (0, 636), (1080, 644), (0, 230, 255), -1)
     elif res.mode == "center_only":
         gc = res.gameplay_crop
         roi = frame[gc["y"] : gc["y"] + gc["h"], gc["x"] : gc["x"] + gc["w"]]

@@ -37,14 +37,14 @@ export function App() {
   const [transcript, setTranscript] = useState<TranscriptMeta | null>(null);
   const [captionPresets, setCaptionPresets] = useState<PresetOption[]>([]);
   const [layouts, setLayouts] = useState<PresetOption[]>([]);
-  const [activeJob, setActiveJob] = useState<JobState | null>(null);
+  const [jobsByKind, setJobsByKind] = useState<Record<string, JobState | null>>({});
   const [toast, setToast] = useState<{ msg: string; type: "ok" | "err" } | null>(null);
   const [showClearModal, setShowClearModal] = useState(false);
   const [clearInputCaches, setClearInputCaches] = useState(false);
   const [clearingRecords, setClearingRecords] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
 
-  const unsubRef = useRef<(() => void) | null>(null);
+  const unsubsRef = useRef<Record<string, () => void>>({});
 
   const notify = useCallback((msg: string, type: "ok" | "err" = "ok") => {
     setToast({ msg, type });
@@ -67,51 +67,59 @@ export function App() {
       setTranscript(p.transcript);
       setCaptionPresets(pr.caption_presets);
       setLayouts(pr.layouts);
-      if (p.current_job && !activeJob) {
-        setActiveJob(p.current_job);
+      if (p.current_job && Object.keys(jobsByKind).length === 0) {
+        setJobsByKind((prev) => ({ ...prev, [p.current_job!.kind]: p.current_job }));
       }
     } catch {
       // backend starting up
     }
-  }, [activeJob]);
+  }, [jobsByKind]);
 
   const attachJobStream = useCallback(
-    (jobId: string, initialTitle = "Processando...") => {
-      if (unsubRef.current) {
-        unsubRef.current();
-        unsubRef.current = null;
+    (jobId: string, kind: "pipeline" | "upload" | "download", initialTitle = "Processando...") => {
+      if (unsubsRef.current[kind]) {
+        unsubsRef.current[kind]();
+        delete unsubsRef.current[kind];
       }
 
-      setActiveJob((prev) => ({
-        job_id: jobId,
-        kind: prev?.job_id === jobId ? prev.kind : tab === "shorts" ? "upload" : "pipeline",
-        title: prev?.job_id === jobId ? prev.title : initialTitle,
-        status: "running",
-        step: "starting",
-        progress: 0,
-        logs: [],
-        result: null,
-        error: null,
-        started_at: new Date().toISOString(),
-        finished_at: null,
+      setJobsByKind((prev) => ({
+        ...prev,
+        [kind]: {
+          job_id: jobId,
+          kind,
+          title: initialTitle,
+          status: "running",
+          step: "starting",
+          progress: 0,
+          logs: [],
+          result: null,
+          error: null,
+          started_at: new Date().toISOString(),
+          finished_at: null,
+        },
       }));
 
       void api.currentJob().then((res) => {
-        if (res.job && res.job.job_id === jobId) {
-          setActiveJob(res.job);
+        const j = res.jobs?.[kind] ?? (res.job?.job_id === jobId ? res.job : null);
+        if (j && j.job_id === jobId) {
+          setJobsByKind((prev) => ({ ...prev, [kind]: j }));
         }
       });
 
-      unsubRef.current = subscribeToJob(jobId, {
+      unsubsRef.current[kind] = subscribeToJob(jobId, {
         onLogs: (lines) => {
-          setActiveJob((prev) =>
-            prev
-              ? { ...prev, logs: [...prev.logs, ...lines].slice(-400) }
-              : prev
-          );
+          setJobsByKind((prev) => {
+            const cur = prev[kind];
+            if (!cur || cur.job_id !== jobId) return prev;
+            return { ...prev, [kind]: { ...cur, logs: [...cur.logs, ...lines].slice(-400) } };
+          });
         },
         onState: (st) => {
-          setActiveJob((prev) => (prev ? { ...prev, ...st } : prev));
+          setJobsByKind((prev) => {
+            const cur = prev[kind];
+            if (!cur || cur.job_id !== jobId) return prev;
+            return { ...prev, [kind]: { ...cur, ...st } };
+          });
           if (st.status === "done") {
             notify("Tarefa concluída com sucesso!");
             void refreshAll();
@@ -125,34 +133,46 @@ export function App() {
         },
       });
     },
-    [notify, refreshAll, tab]
+    [notify, refreshAll]
   );
 
   useEffect(() => {
     void refreshAll().then(async () => {
       try {
         const res = await api.currentJob();
-        if (res.job) {
-          setActiveJob(res.job);
-          if (res.job.status === "running") {
-            attachJobStream(res.job.job_id, res.job.title);
+        const allJobs = res.jobs ?? (res.job ? { [res.job.kind]: res.job } : {});
+        setJobsByKind(allJobs);
+        for (const [k, j] of Object.entries(allJobs)) {
+          if (j && j.status === "running") {
+            attachJobStream(j.job_id, k as "pipeline" | "upload" | "download", j.title);
           }
         }
       } catch {
         // ignore
       }
     });
+    const onBeforeUnload = () => {
+      try {
+        navigator.sendBeacon("/api/system/shutdown");
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
     return () => {
-      if (unsubRef.current) unsubRef.current();
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      Object.values(unsubsRef.current).forEach((fn) => fn());
     };
   }, []);
+
+  const anyRunning = Object.values(jobsByKind).some((j) => j?.status === "running");
 
   const handleClearRecords = async () => {
     setClearingRecords(true);
     try {
       const res = await api.clearRecords(clearInputCaches);
-      if (activeJob?.status !== "running") {
-        setActiveJob(null);
+      if (!anyRunning) {
+        setJobsByKind({});
       }
       setShowClearModal(false);
       setClearInputCaches(false);
@@ -209,7 +229,7 @@ export function App() {
 
           <div className="pt-2">
             <button
-              disabled={activeJob?.status === "running"}
+              disabled={anyRunning}
               onClick={() => setShowClearModal(true)}
               className="flex w-full items-center gap-3 rounded-xl border border-rose-500/20 bg-rose-500/5 px-3.5 py-2.5 text-sm font-medium text-rose-300 transition hover:border-rose-500/40 hover:bg-rose-500/15 disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -269,14 +289,19 @@ export function App() {
             {navItems.find((n) => n.id === tab)?.label}
           </div>
 
-          <div className="flex items-center gap-3">
-            {activeJob?.status === "running" && (
-              <div className="flex items-center gap-2 rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs text-sky-300">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                <span className="max-w-[200px] truncate">{activeJob.title}</span>
-                <span className="font-mono font-bold">{activeJob.progress}%</span>
-              </div>
-            )}
+          <div className="flex items-center gap-2">
+            {Object.values(jobsByKind)
+              .filter((j): j is JobState => Boolean(j && j.status === "running"))
+              .map((j) => (
+                <div
+                  key={j.job_id}
+                  className="flex items-center gap-2 rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs text-sky-300"
+                >
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span className="max-w-[180px] truncate">{j.title}</span>
+                  <span className="font-mono font-bold">{j.progress}%</span>
+                </div>
+              ))}
           </div>
         </header>
 
@@ -289,17 +314,27 @@ export function App() {
                 transcript={transcript}
                 captionPresets={captionPresets}
                 layouts={layouts}
-                activeJob={activeJob}
+                activeJob={
+                  jobsByKind.download?.status === "running"
+                    ? jobsByKind.download
+                    : jobsByKind.pipeline ?? jobsByKind.download ?? null
+                }
                 onRefresh={refreshAll}
-                onStartJob={(id) => attachJobStream(id, "Pipeline 9:16")}
+                onStartJob={(id) =>
+                  void api.currentJob().then((r) => {
+                    const found = Object.values(r.jobs ?? {}).find((x) => x?.job_id === id);
+                    const k = (found?.kind ?? "pipeline") as "pipeline" | "download";
+                    attachJobStream(id, k, found?.title ?? "Pipeline 9:16");
+                  })
+                }
                 onNotify={notify}
               />
             )}
             {tab === "shorts" && (
               <ShortsTab
-                activeJob={activeJob}
+                activeJob={jobsByKind.upload ?? null}
                 refreshKey={refreshTick}
-                onStartJob={(id) => attachJobStream(id, "Upload YouTube Shorts")}
+                onStartJob={(id) => attachJobStream(id, "upload", "Upload YouTube Shorts")}
                 onNotify={notify}
               />
             )}

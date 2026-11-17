@@ -56,42 +56,72 @@ Cortes Monetizaveis/
 
 ---
 
-## Pré-requisitos
+## Pré-requisitos e Repositórios Externos
 
-- **Python 3.12+**
-- **Node.js 20+** e **npm**
-- **FFmpeg / FFprobe** instalados no sistema (ou no `PATH`)
-- **Microsoft Edge** ou **Google Chrome** (usado tanto para a janela standalone quanto para automação CDP do YouTube Studio)
+Antes de instalar as dependências do projeto, garanta que os softwares e binários abaixo estejam disponíveis no sistema:
+
+| Componente | Obrigatório | Endereço Oficial / Repositório | Instalação rápida (Windows `winget`) |
+| :--- | :---: | :--- | :--- |
+| **Python 3.12+** | Sim | [python.org/downloads](https://www.python.org/downloads/) | `winget install Python.Python.3.12` |
+| **Node.js 20+ (npm)** | Sim | [nodejs.org](https://nodejs.org/) | `winget install OpenJS.NodeJS.LTS` |
+| **FFmpeg / FFprobe** | Sim | [gyan.dev/ffmpeg/builds](https://www.gyan.dev/ffmpeg/builds/) · [ffmpeg.org](https://ffmpeg.org/download.html) | `winget install Gyan.FFmpeg` |
+| **yt-dlp** *(ou **YtoWave**)* | Recomendado *(YouTube + `.json3`)* | [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/releases) · [YtoWave](https://marentropico.github.io/ytowave/) | `winget install yt-dlp.yt-dlp` |
+| **Google Chrome ou Edge** | Sim *(App + CDP)* | [google.com/chrome](https://www.google.com/chrome/) · [microsoft.com/edge](https://www.microsoft.com/edge) | Pré-instalado no Windows (Edge) |
+
+> **Descoberta automática de binários:** O sistema procura `ffmpeg.exe`/`ffprobe.exe` no `PATH`, em `bin/`, `C:\ffmpeg\bin` e pacotes do WinGet (`Gyan.FFmpeg`). Para download do YouTube e legendas `.json3`, procura `yt-dlp.exe` no `PATH`, na pasta do **YtoWave** (`ytowave/bin/yt-dlp.exe`) ou via variáveis `YT_DLP_PATH` / `YTOWAVE_BIN_DIR`.
 
 ---
 
 ## Instalação
 
-### 1. Ambiente Python
+### 1. Clonar o repositório
+```powershell
+git clone <url-do-seu-repositorio>
+cd "Cortes Monetizaveis"
+```
+
+### 2. Ambiente Python e Pacotes (`requirements.txt`)
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. Frontend React
+Principais pacotes Python instalados via [PyPI](https://pypi.org/) (`requirements.txt`):
+- **Transcrição:** [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) `>=1.1.0` *(modelos `int8` são baixados automaticamente na 1ª execução para `temp/models/` via [HuggingFace Systran](https://huggingface.co/Systran))*
+- **Visão / Facecam:** [`mediapipe`](https://github.com/google-ai-edge/mediapipe) `>=0.10.14`, `opencv-python>=4.9.0`, `Pillow>=10.0.0`
+- **Vídeo / Áudio / NLP:** `ffmpeg-python>=0.2.0`, `moviepy>=2.0.0`, `numpy>=1.26.0`, `scipy>=1.12.0`, `nltk>=3.8.1`
+- **Backend / UI:** `fastapi>=0.115.0`, `uvicorn>=0.30.0`, `python-multipart>=0.0.9`, `gradio>=5.0.0` *(legado)*
+- **Automação Studio:** [`playwright`](https://playwright.dev/python/) `>=1.48.0` *(requer `playwright install chromium`)*
+
+### 3. Frontend React (`frontend/`) e Remotion (`remotion/`, opcional)
 ```powershell
 npm --prefix frontend install
 npm run build
 ```
 
-### 3. Variáveis de Ambiente (`.env`)
+Caso utilize os templates React 9:16 em `remotion/`:
+```powershell
+npm --prefix remotion install
+```
+
+Principais pacotes Node.js via [npm](https://www.npmjs.com/):
+- **Frontend (`frontend/package.json`):** `react@^19.0.0`, `react-dom@^19.0.0`, `lucide-react@^0.475.0`, `vite@^6.2.0`, `tailwindcss@^4.0.9`, `@tailwindcss/vite@^4.0.9`, `typescript@~5.7.2`
+- **Remotion (`remotion/package.json`):** `remotion@4.0.537`, `@remotion/cli`, `@remotion/noise`, `@remotion/shapes`, `@remotion/transitions`
+
+### 4. Variáveis de Ambiente e Chaves de API (`.env`)
 Copie `.env.example` para `.env` e preencha apenas o que for utilizar (todas as chaves são opcionais — o pipeline local funciona 100% sem LLMs externas):
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Campos disponíveis em `.env`:
-- `ARANDU_GEMINI_KEY_1`, `ARANDU_GEMINI_KEY_2`, `ARANDU_MODEL`, `ARANDU_MODEL_FALLBACK`: Pool de chaves Gemini para curadoria de cortes, títulos e Coach IA.
-- `ARANDU_OPENROUTER_KEY`, `ARANDU_OPENROUTER_FREE_MODEL`: Fallback OpenRouter.
-- `YOUTUBE_API_KEY`, `YOUTUBE_CHANNEL_REF`: YouTube Data API v3 para sincronização e Analytics do canal.
+Onde obter as chaves opcionais:
+- **Gemini API (`ARANDU_GEMINI_KEY_1`, `ARANDU_GEMINI_KEY_2`):** [Google AI Studio](https://aistudio.google.com/apikey) — pool de chaves para curadoria de cortes, títulos, revisão de legendas e Coach IA.
+- **OpenRouter (`ARANDU_OPENROUTER_KEY`):** [openrouter.ai/keys](https://openrouter.ai/keys) — fallback com modelos gratuitos (`openrouter/free`).
+- **YouTube Data API v3 (`YOUTUBE_API_KEY`, `YOUTUBE_CHANNEL_REF`):** [Google Cloud Console — YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com) — sincronização e métricas de Analytics do canal.
 
 ---
 

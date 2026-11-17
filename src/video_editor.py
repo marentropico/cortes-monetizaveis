@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -119,13 +121,39 @@ class VerticalVideoEditor:
         return mask_path
 
     @staticmethod
-    def _get_branding_assets() -> tuple[Path, Path | None] | None:
-        """Return (logo.png, follow.png | None) from assets/ if logo.png exists."""
+    def _ensure_scaled_brand_png(src_path: Path, cache_name: str, max_w: int = 460, max_h: int = 250) -> Path:
+        """Pre-scale branding PNG once into temp/ to avoid per-frame 3K Lanczos scaling."""
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        dst_path = TEMP_DIR / cache_name
+        if dst_path.is_file() and dst_path.stat().st_mtime >= src_path.stat().st_mtime:
+            return dst_path
+        from PIL import Image
+
+        with Image.open(src_path) as img:
+            rgba = img.convert("RGBA")
+            rgba.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+            # Ensure even dimensions for FFmpeg filters
+            ew = max(2, rgba.width - (rgba.width % 2))
+            eh = max(2, rgba.height - (rgba.height % 2))
+            if (ew, eh) != (rgba.width, rgba.height):
+                rgba = rgba.resize((ew, eh), Image.Resampling.LANCZOS)
+            rgba.save(dst_path, format="PNG")
+        return dst_path
+
+    @classmethod
+    def _get_branding_assets(cls) -> tuple[Path, Path | None] | None:
+        """Return pre-scaled (logo, follow | None) from temp/ if assets/logo.png exists."""
         assets_dir = PROJECT_ROOT / "assets"
         logo = assets_dir / "logo.png"
         follow = assets_dir / "follow.png"
         if logo.is_file():
-            return logo, (follow if follow.is_file() else None)
+            scaled_logo = cls._ensure_scaled_brand_png(logo, "brand_logo_460.png")
+            scaled_follow = (
+                cls._ensure_scaled_brand_png(follow, "brand_follow_460.png")
+                if follow.is_file()
+                else None
+            )
+            return scaled_logo, scaled_follow
         return None
 
     def _build_filter_complex(
@@ -133,6 +161,7 @@ class VerticalVideoEditor:
         crop_info: FaceCropResult,
         ass_rel_posix: str | None,
         clip_duration: float = 30.0,
+        track_info: dict[str, Any] | None = None,
     ) -> tuple[str, list[Path]]:
         sub_suffix = f",subtitles='{ass_rel_posix}'" if ass_rel_posix else ""
 
@@ -145,65 +174,83 @@ class VerticalVideoEditor:
             mask_path = self._ensure_circle_mask_png(340)
             extra_inputs: list[Path] = [mask_path]
 
+            if track_info and track_info.get("cmd_file"):
+                ic = track_info["initial_crop"]
+                ia = float(track_info.get("initial_alpha", 1.0))
+                cmd_rel = Path(track_info["cmd_file"]).resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+                face_chain = (
+                    f"[vface]sendcmd=f='{cmd_rel}',"
+                    f"crop@facecrop=w={ic['w']}:h={ic['h']}:x={ic['x']}:y={ic['y']},"
+                    "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
+                    "[1:v]format=gray[mask];"
+                    f"[f_rgba][mask]alphamerge,colorchannelmixer@facealpha=aa={ia:.2f}[f_circ];"
+                )
+            elif track_info and track_info.get("is_static") and track_info.get("initial_crop"):
+                ic = track_info["initial_crop"]
+                face_chain = (
+                    f"[vface]crop={ic['w']}:{ic['h']}:{ic['x']}:{ic['y']},"
+                    "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
+                    "[1:v]format=gray[mask];"
+                    "[f_rgba][mask]alphamerge[f_circ];"
+                )
+            else:
+                face_chain = (
+                    f"[vface]crop={side}:{side}:{fx}:{fy},"
+                    "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
+                    "[1:v]format=gray[mask];"
+                    "[f_rgba][mask]alphamerge[f_circ];"
+                )
+
+            base_chain = (
+                "[0:v]setpts=PTS-STARTPTS,fps=30,split=3[vtop][vbot][vface];"
+                "[vtop]scale=1080:608:flags=lanczos,setsar=1[top];"
+                f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
+                "scale=1080:1312:flags=lanczos,setsar=1[bot];"
+                "[top][bot]vstack=inputs=2[base];"
+                + face_chain
+            )
+
             branding = self._get_branding_assets()
             if branding is not None:
                 logo_path, follow_path = branding
                 extra_inputs.append(logo_path)
                 if follow_path is not None:
                     extra_inputs.append(follow_path)
-                    mid = max(2.0, float(clip_duration) / 2.0)
-                    pop_expr = (
-                        f"if(lt(t-{mid:.3f},0.16),0.72+0.40*(t-{mid:.3f})/0.16,"
-                        f"if(lt(t-{mid:.3f},0.28),1.12-0.12*(t-{mid:.3f}-0.16)/0.12,1.0))"
+                    dur = max(6.0, float(clip_duration))
+                    t1 = round(dur * 0.42, 3)
+                    t2 = round(max(t1 + 2.0, dur * 0.85), 3)
+                    pop_follow = (
+                        f"if(lt(t-{t1:.3f},0.16),0.72+0.40*(t-{t1:.3f})/0.16,"
+                        f"if(lt(t-{t1:.3f},0.28),1.12-0.12*(t-{t1:.3f}-0.16)/0.12,1.0))"
+                    )
+                    pop_logo_ret = (
+                        f"if(gte(t,{t2:.3f}),"
+                        f"if(lt(t-{t2:.3f},0.16),0.72+0.40*(t-{t2:.3f})/0.16,"
+                        f"if(lt(t-{t2:.3f},0.28),1.12-0.12*(t-{t2:.3f}-0.16)/0.12,1.0)),"
+                        "1.0)"
                     )
                     fc_str = (
-                        "[0:v]setpts=PTS-STARTPTS,split=3[vtop][vbot][vface];"
-                        "[vtop]scale=1080:608:flags=lanczos,setsar=1[top];"
-                        f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
-                        "scale=1080:1312:flags=lanczos,setsar=1[bot];"
-                        "[top][bot]vstack=inputs=2,"
-                        "drawbox=x=0:y=606:w=1080:h=4:color=0x00E6FF@0.85:t=fill[base];"
-                        f"[vface]crop={side}:{side}:{fx}:{fy},"
-                        "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
-                        "[1:v]format=gray[mask];"
-                        "[f_rgba][mask]alphamerge[f_circ];"
-                        "[base][f_circ]overlay=x=696:y=438:shortest=1[base_circ];"
-                        "[2:v]scale=460:250:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba[brand_logo];"
-                        "[3:v]scale=460:250:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,"
-                        f"scale=w='trunc(iw*{pop_expr}/2)*2':h=-2:eval=frame:flags=lanczos[brand_follow];"
-                        f"[base_circ][brand_logo]overlay=x=420-w/2:y=608-h/2:enable='lt(t,{mid:.3f})':shortest=1[base_b1];"
-                        f"[base_b1][brand_follow]overlay=x=420-w/2:y=608-h/2:enable='gte(t,{mid:.3f})':shortest=1"
-                        f"{sub_suffix}[vout]"
+                        base_chain
+                        + "[base][f_circ]overlay=x=696:y=438:shortest=1[base_circ];"
+                        + "[2:v]format=rgba,colorchannelmixer=aa=0.50,"
+                        + f"scale=w='trunc(iw*{pop_logo_ret}/2)*2':h=-2:eval=frame:flags=bilinear[brand_logo];"
+                        + "[3:v]format=rgba,colorchannelmixer=aa=0.50,"
+                        + f"scale=w='trunc(iw*{pop_follow}/2)*2':h=-2:eval=frame:flags=bilinear[brand_follow];"
+                        + f"[base_circ][brand_logo]overlay=x=420-w/2:y=608-h/2:enable='lt(t,{t1:.3f})+gte(t,{t2:.3f})':shortest=1[base_b1];"
+                        + f"[base_b1][brand_follow]overlay=x=420-w/2:y=608-h/2:enable='gte(t,{t1:.3f})*lt(t,{t2:.3f})':shortest=1"
+                        + f"{sub_suffix}[vout]"
                     )
                 else:
                     fc_str = (
-                        "[0:v]setpts=PTS-STARTPTS,split=3[vtop][vbot][vface];"
-                        "[vtop]scale=1080:608:flags=lanczos,setsar=1[top];"
-                        f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
-                        "scale=1080:1312:flags=lanczos,setsar=1[bot];"
-                        "[top][bot]vstack=inputs=2,"
-                        "drawbox=x=0:y=606:w=1080:h=4:color=0x00E6FF@0.85:t=fill[base];"
-                        f"[vface]crop={side}:{side}:{fx}:{fy},"
-                        "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
-                        "[1:v]format=gray[mask];"
-                        "[f_rgba][mask]alphamerge[f_circ];"
-                        "[base][f_circ]overlay=x=696:y=438:shortest=1[base_circ];"
-                        "[2:v]scale=460:250:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba[brand_logo];"
-                        f"[base_circ][brand_logo]overlay=x=420-w/2:y=608-h/2:shortest=1{sub_suffix}[vout]"
+                        base_chain
+                        + "[base][f_circ]overlay=x=696:y=438:shortest=1[base_circ];"
+                        + "[2:v]format=rgba,colorchannelmixer=aa=0.50[brand_logo];"
+                        + f"[base_circ][brand_logo]overlay=x=420-w/2:y=608-h/2:shortest=1{sub_suffix}[vout]"
                     )
             else:
                 fc_str = (
-                    "[0:v]setpts=PTS-STARTPTS,split=3[vtop][vbot][vface];"
-                    "[vtop]scale=1080:608:flags=lanczos,setsar=1[top];"
-                    f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
-                    "scale=1080:1312:flags=lanczos,setsar=1[bot];"
-                    "[top][bot]vstack=inputs=2,"
-                    "drawbox=x=0:y=606:w=1080:h=4:color=0x00E6FF@0.85:t=fill[base];"
-                    f"[vface]crop={side}:{side}:{fx}:{fy},"
-                    "scale=340:340:flags=lanczos,setsar=1,format=rgba[f_rgba];"
-                    "[1:v]format=gray[mask];"
-                    "[f_rgba][mask]alphamerge[f_circ];"
-                    f"[base][f_circ]overlay=x=696:y=438:shortest=1{sub_suffix}[vout]"
+                    base_chain
+                    + f"[base][f_circ]overlay=x=696:y=438:shortest=1{sub_suffix}[vout]"
                 )
             return fc_str, extra_inputs
 
@@ -211,20 +258,18 @@ class VerticalVideoEditor:
             fc = crop_info.face_crop
             gc = crop_info.gameplay_crop
             return (
-                "[0:v]setpts=PTS-STARTPTS,split=2[vtop][vbot];"
+                "[0:v]setpts=PTS-STARTPTS,fps=30,split=2[vtop][vbot];"
                 f"[vtop]crop={fc['w']}:{fc['h']}:{fc['x']}:{fc['y']},"
                 "scale=1080:640:flags=lanczos,setsar=1[top];"
                 f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
                 "scale=1080:1280:flags=lanczos,setsar=1[bot];"
-                "[top][bot]vstack=inputs=2,"
-                "drawbox=x=0:y=637:w=1080:h=6:color=0x00E6FF@0.9:t=fill"
-                f"{sub_suffix}[vout]"
+                f"[top][bot]vstack=inputs=2{sub_suffix}[vout]"
             ), []
 
         if crop_info.mode == "center_only":
             gc = crop_info.gameplay_crop
             return (
-                "[0:v]setpts=PTS-STARTPTS,"
+                "[0:v]setpts=PTS-STARTPTS,fps=30,"
                 f"crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
                 f"scale=1080:1920:flags=lanczos,setsar=1{sub_suffix}[vout]"
             ), []
@@ -240,7 +285,7 @@ class VerticalVideoEditor:
             fg_w = _even(int(round(1920.0 * src_ar)))
 
         return (
-            "[0:v]setpts=PTS-STARTPTS,split=2[vbg][vfg];"
+            "[0:v]setpts=PTS-STARTPTS,fps=30,split=2[vbg][vfg];"
             f"[vbg]crop={bg_crop['w']}:{bg_crop['h']}:{bg_crop['x']}:{bg_crop['y']},"
             "scale=1080:1920:flags=bilinear,boxblur=25:5,eq=brightness=-0.12,setsar=1[bg];"
             f"[vfg]scale={fg_w}:{fg_h}:flags=lanczos,setsar=1[fg];"
@@ -258,44 +303,38 @@ class VerticalVideoEditor:
         encoder: str,
         extra_inputs: list[Path] | None = None,
     ) -> tuple[bool, str]:
-        cmd = [
-            self.ffmpeg_bin,
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{start:.3f}",
-            "-t",
-            f"{duration:.3f}",
-            "-i",
-            str(video_path),
-        ]
-        for extra_inp in extra_inputs or []:
-            cmd.extend(["-loop", "1", "-t", f"{duration:.3f}", "-i", str(extra_inp)])
+        def _build_cmd(use_hwaccel: bool) -> list[str]:
+            cmd = [self.ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error"]
+            if use_hwaccel:
+                cmd.extend(["-hwaccel", "d3d11va"])
+            cmd.extend(["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(video_path)])
+            for extra_inp in extra_inputs or []:
+                cmd.extend(["-loop", "1", "-r", "30", "-t", f"{duration:.3f}", "-i", str(extra_inp)])
 
-        cmd.extend([
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "[vout]",
-        ])
-        if has_audio:
-            cmd.extend(["-map", "0:a", "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "192k", "-ar", "44100"])
+            cmd.extend(["-filter_complex", filter_complex, "-map", "[vout]"])
+            if has_audio:
+                cmd.extend(
+                    ["-map", "0:a", "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "192k", "-ar", "44100"]
+                )
+            cmd.extend(get_h264_encoder_args(encoder))
+            cmd.extend(["-r", "30", "-movflags", "+faststart", str(output_file)])
+            return cmd
 
-        cmd.extend(get_h264_encoder_args(encoder))
-        cmd.extend(["-movflags", "+faststart", str(output_file)])
-
-        proc = subprocess.run(
-            cmd,
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        return proc.returncode == 0, proc.stderr.strip()
+        for hwaccel in (True, False):
+            proc = subprocess.run(
+                _build_cmd(hwaccel),
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if proc.returncode == 0:
+                return True, ""
+            if not hwaccel:
+                return False, proc.stderr.strip()
+        return False, "FFmpeg render failed"
 
     def _load_or_detect_video_facecam(
         self,
@@ -362,6 +401,8 @@ class VerticalVideoEditor:
         skip_existing: bool = False,
         precision_retranscribe: bool = True,
         refine_captions_with_llm: bool = True,
+        dynamic_face_tracking: bool = True,
+        face_track_mode: str = "pinned",
     ) -> list[dict[str, Any]]:
         """Render all cuts listed in cuts.json into output/<video_stem>/."""
         vpath = Path(video_path).resolve()
@@ -401,28 +442,264 @@ class VerticalVideoEditor:
                 progress_callback=progress_callback,
             )
 
-        for idx, cut in enumerate(cuts, start=1):
-            cut_id = int(cut.get("id", idx))
-            title = str(cut.get("title") or f"Corte_{cut_id}").strip()
-            safe_title = "".join(ch if (ch.isalnum() or ch in ("_", "-")) else "_" for ch in title)[:55]
-            c_start = max(0.0, float(cut["start"]))
-            c_end = float(cut["end"])
-            if total_dur > 0:
-                c_end = min(total_dur, c_end)
-            duration = round(c_end - c_start, 3)
-            if duration < 1.5:
-                continue
+        prep_queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize=2)
+        stop_event = threading.Event()
 
-            out_mp4 = project_out_dir / f"{cut_id:02d}_{safe_title}.mp4"
-            if skip_existing and out_mp4.is_file() and out_mp4.stat().st_size > 10_240:
+        def _producer() -> None:
+            nonlocal precision_transcriber
+            try:
+                for idx, cut in enumerate(cuts, start=1):
+                    if stop_event.is_set():
+                        break
+                    cut_id = int(cut.get("id", idx))
+                    title = str(cut.get("title") or f"Corte_{cut_id}").strip()
+                    safe_title = "".join(ch if (ch.isalnum() or ch in ("_", "-")) else "_" for ch in title)[:55]
+                    c_start = max(0.0, float(cut["start"]))
+                    c_end = float(cut["end"])
+                    if total_dur > 0:
+                        c_end = min(total_dur, c_end)
+                    duration = round(c_end - c_start, 3)
+                    if duration < 1.5:
+                        continue
+
+                    out_mp4 = project_out_dir / f"{cut_id:02d}_{safe_title}.mp4"
+                    if skip_existing and out_mp4.is_file() and out_mp4.stat().st_size > 10_240:
+                        try:
+                            clip_info = probe_video_info(out_mp4)
+                            if float(clip_info.get("duration", 0)) < 1.0:
+                                raise ValueError("Duração inválida")
+                            if progress_callback:
+                                progress_callback(f"[{idx}/{len(cuts)}] Pulando corte já renderizado: {out_mp4.name}")
+                            existing_rec = next(
+                                (r for r in existing_index if r.get("output_path") == str(out_mp4)),
+                                None,
+                            )
+                            record = existing_rec or {
+                                "id": cut_id,
+                                "title": safe_title,
+                                "source_video": vpath.name,
+                                "source_stem": vpath.stem,
+                                "output_path": str(out_mp4),
+                                "start": c_start,
+                                "end": c_end,
+                                "duration": clip_info.get("duration", duration),
+                                "duration_type": cut.get("duration_type", f"{int(round(duration))}s"),
+                                "size_mb": clip_info.get("size_mb", 0.0),
+                                "layout_mode": cached_crop_res.mode if cached_crop_res else layout_mode,
+                                "encoder": self.preferred_encoder,
+                                "hook_text": cut.get("hook_text", ""),
+                                "context_reason": cut.get("context_reason", ""),
+                                "created_at": datetime.fromtimestamp(out_mp4.stat().st_mtime).isoformat(timespec="seconds"),
+                            }
+                            prep_queue.put({"kind": "skipped", "record": record, "out_mp4": out_mp4})
+                            continue
+                        except Exception:
+                            if progress_callback:
+                                progress_callback(f"[{idx}/{len(cuts)}] Arquivo incompleto detectado ({out_mp4.name}); re-renderizando...")
+                            out_mp4.unlink(missing_ok=True)
+
+                    if cached_crop_res is not None:
+                        crop_res = cached_crop_res
+                    else:
+                        if progress_callback:
+                            progress_callback(f"[{idx}/{len(cuts)}] Analisando facecam para '{safe_title}'...")
+                        crop_res = self.face_detector.detect_facecam(
+                            vpath,
+                            start=c_start,
+                            end=c_end,
+                            layout_mode=layout_mode,
+                            num_samples=10,
+                        )
+
+                    ass_rel_posix: str | None = None
+                    if self.burn_captions:
+                        clip_segs = [
+                            s
+                            for s in transcript_data.get("segments", [])
+                            if float(s.get("end", 0.0)) >= c_start and float(s.get("start", 0.0)) <= c_end
+                        ]
+                        clip_lang = str(transcript_data.get("language", "pt"))
+
+                        if precision_retranscribe:
+                            try:
+                                if precision_transcriber is None:
+                                    from src.transcriber import GameplayTranscriber
+
+                                    if progress_callback:
+                                        progress_callback("Passada 2: carregando Whisper 'small' (beam=5) para legendas de alta precisão...")
+                                    precision_transcriber = GameplayTranscriber(model_size="small")
+                                if progress_callback:
+                                    progress_callback(f"[{idx}/{len(cuts)}] Re-transcrevendo trecho #{cut_id} com alta precisão...")
+                                refined_segs = precision_transcriber.retranscribe_clip_range(
+                                    vpath,
+                                    start=c_start,
+                                    end=c_end,
+                                    language=clip_lang,
+                                    audio_wav_path=transcript_data.get("audio_wav"),
+                                )
+                                if refined_segs:
+                                    clip_segs = refined_segs
+                            except Exception as exc:
+                                if progress_callback:
+                                    progress_callback(f"Passada 2 ignorada em #{cut_id} ({exc}); usando transcrição base.")
+
+                        if refine_captions_with_llm and clip_segs:
+                            try:
+                                from src.llm_pool import has_active_pool, refine_segment_captions_with_pool
+
+                                if has_active_pool():
+                                    clip_segs, used_llm = refine_segment_captions_with_pool(
+                                        clip_segs,
+                                        game_context=vpath.stem,
+                                        language=clip_lang,
+                                    )
+                                    if progress_callback:
+                                        progress_callback(f"[{idx}/{len(cuts)}] Legendas lapidadas via {used_llm}.")
+                            except Exception as exc:
+                                if progress_callback:
+                                    progress_callback(f"Lapidação LLM ignorada em #{cut_id} ({exc}).")
+
+                        ass_path = TEMP_DIR / f"cut_{cut_id}.ass"
+                        self.captioner.generate_ass(
+                            transcript_data={"segments": clip_segs},
+                            cut_start=c_start,
+                            cut_end=c_end,
+                            output_ass_path=ass_path,
+                            hook_text=str(cut.get("hook_text", "")),
+                            layout_mode=crop_res.mode,
+                        )
+                        ass_rel_posix = ass_path.relative_to(PROJECT_ROOT).as_posix()
+
+                    if face_track_mode == "quick_detect" and layout_mode == "auto" and crop_res.mode != "pip_split":
+                        fw, fh = crop_res.frame_width, crop_res.frame_height
+                        fsz = _even(min(fw, fh) // 3)
+                        crop_res = FaceCropResult(
+                            detected=True,
+                            mode="pip_split",
+                            detector_backend=crop_res.detector_backend,
+                            frame_width=fw,
+                            frame_height=fh,
+                            face_crop={"x": _even((fw - fsz) // 2), "y": _even((fh - fsz) // 3), "w": fsz, "h": fsz},
+                            gameplay_crop=_compute_gameplay_crop(fw, fh, 1080, 1312),
+                            confidence=crop_res.confidence,
+                            detections_count=crop_res.detections_count,
+                            samples_count=crop_res.samples_count,
+                        )
+
+                    track_info: dict[str, Any] | None = None
+                    if dynamic_face_tracking and crop_res.mode == "pip_split" and crop_res.face_crop:
+                        try:
+                            from src.face_tracker import track_face_in_cut
+
+                            if progress_callback:
+                                mode_lbl = "Quick Detect" if face_track_mode == "quick_detect" else "Rosto Pinnado"
+                                progress_callback(f"[{idx}/{len(cuts)}] Rastreando rosto ({mode_lbl}) no trecho #{cut_id}...")
+                            track_info = track_face_in_cut(
+                                video_path=vpath,
+                                start=c_start,
+                                end=c_end,
+                                fallback_crop=crop_res.face_crop,
+                                cmd_output_path=TEMP_DIR / f"track_cmds_{cut_id}.txt",
+                                sample_fps=3.0,
+                                mode=face_track_mode,
+                            )
+                        except Exception as exc:
+                            if progress_callback:
+                                progress_callback(f"Tracking dinâmico ignorado em #{cut_id} ({exc}); usando crop fixo.")
+                            track_info = None
+
+                    filter_complex, extra_inputs = self._build_filter_complex(
+                        crop_res, ass_rel_posix, clip_duration=duration, track_info=track_info
+                    )
+                    prep_queue.put(
+                        {
+                            "kind": "render",
+                            "idx": idx,
+                            "cut": cut,
+                            "cut_id": cut_id,
+                            "safe_title": safe_title,
+                            "c_start": c_start,
+                            "c_end": c_end,
+                            "duration": duration,
+                            "out_mp4": out_mp4,
+                            "crop_res": crop_res,
+                            "filter_complex": filter_complex,
+                            "extra_inputs": extra_inputs,
+                        }
+                    )
+            except Exception as exc:
+                prep_queue.put({"kind": "error", "error": exc})
+            finally:
+                prep_queue.put(None)
+
+        prep_thread = threading.Thread(target=_producer, daemon=True)
+        prep_thread.start()
+
+        try:
+            while True:
+                item = prep_queue.get()
+                if item is None:
+                    break
+                if item["kind"] == "error":
+                    raise item["error"]
+                if item["kind"] == "skipped":
+                    record = item["record"]
+                    out_mp4 = item["out_mp4"]
+                    rendered_records.append(record)
+                    existing_index = [r for r in existing_index if r.get("output_path") != str(out_mp4)]
+                    existing_index.insert(0, record)
+                    _save_projects_index(existing_index)
+                    continue
+
+                idx = item["idx"]
+                cut = item["cut"]
+                cut_id = item["cut_id"]
+                safe_title = item["safe_title"]
+                c_start = item["c_start"]
+                c_end = item["c_end"]
+                duration = item["duration"]
+                out_mp4 = item["out_mp4"]
+                crop_res = item["crop_res"]
+                filter_complex = item["filter_complex"]
+                extra_inputs = item["extra_inputs"]
+
                 if progress_callback:
-                    progress_callback(f"[{idx}/{len(cuts)}] Pulando corte já renderizado: {out_mp4.name}")
-                clip_info = probe_video_info(out_mp4)
-                existing_rec = next(
-                    (r for r in existing_index if r.get("output_path") == str(out_mp4)),
-                    None,
+                    progress_callback(
+                        f"[{idx}/{len(cuts)}] Renderizando {out_mp4.name} ({crop_res.mode}, {self.preferred_encoder})..."
+                    )
+
+                ok, err = self._run_ffmpeg_render(
+                    video_path=vpath,
+                    start=c_start,
+                    duration=duration,
+                    filter_complex=filter_complex,
+                    has_audio=has_audio,
+                    output_file=out_mp4,
+                    encoder=self.preferred_encoder,
+                    extra_inputs=extra_inputs,
                 )
-                record = existing_rec or {
+                used_encoder = self.preferred_encoder
+
+                if not ok and self.preferred_encoder != "libx264":
+                    if progress_callback:
+                        progress_callback(f"Fallback automático para libx264 em {out_mp4.name}...")
+                    used_encoder = "libx264"
+                    ok, err = self._run_ffmpeg_render(
+                        video_path=vpath,
+                        start=c_start,
+                        duration=duration,
+                        filter_complex=filter_complex,
+                        has_audio=has_audio,
+                        output_file=out_mp4,
+                        encoder="libx264",
+                        extra_inputs=extra_inputs,
+                    )
+
+                if not ok:
+                    raise RuntimeError(f"Erro ao renderizar {out_mp4.name}: {err}")
+
+                clip_info = probe_video_info(out_mp4)
+                record = {
                     "id": cut_id,
                     "title": safe_title,
                     "source_video": vpath.name,
@@ -433,157 +710,23 @@ class VerticalVideoEditor:
                     "duration": clip_info.get("duration", duration),
                     "duration_type": cut.get("duration_type", f"{int(round(duration))}s"),
                     "size_mb": clip_info.get("size_mb", 0.0),
-                    "layout_mode": cached_crop_res.mode if cached_crop_res else layout_mode,
-                    "encoder": self.preferred_encoder,
+                    "layout_mode": crop_res.mode,
+                    "encoder": used_encoder,
                     "hook_text": cut.get("hook_text", ""),
                     "context_reason": cut.get("context_reason", ""),
-                    "created_at": datetime.fromtimestamp(out_mp4.stat().st_mtime).isoformat(timespec="seconds"),
+                    "youtube_title": cut.get("youtube_title", ""),
+                    "youtube_description": cut.get("youtube_description", ""),
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
                 }
                 rendered_records.append(record)
+
+                # Save index incrementally after each clip for safe batch resume
                 existing_index = [r for r in existing_index if r.get("output_path") != str(out_mp4)]
                 existing_index.insert(0, record)
                 _save_projects_index(existing_index)
-                continue
-
-            if cached_crop_res is not None:
-                crop_res = cached_crop_res
-            else:
-                if progress_callback:
-                    progress_callback(f"[{idx}/{len(cuts)}] Analisando facecam para '{safe_title}'...")
-                crop_res = self.face_detector.detect_facecam(
-                    vpath,
-                    start=c_start,
-                    end=c_end,
-                    layout_mode=layout_mode,
-                    num_samples=10,
-                )
-
-            ass_rel_posix: str | None = None
-            if self.burn_captions:
-                clip_segs = [
-                    s
-                    for s in transcript_data.get("segments", [])
-                    if float(s.get("end", 0.0)) >= c_start and float(s.get("start", 0.0)) <= c_end
-                ]
-                clip_lang = str(transcript_data.get("language", "pt"))
-
-                if precision_retranscribe:
-                    try:
-                        if precision_transcriber is None:
-                            from src.transcriber import GameplayTranscriber
-
-                            if progress_callback:
-                                progress_callback("Passada 2: carregando Whisper 'small' (beam=5) para legendas de alta precisão...")
-                            precision_transcriber = GameplayTranscriber(model_size="small")
-                        if progress_callback:
-                            progress_callback(f"[{idx}/{len(cuts)}] Re-transcrevendo trecho #{cut_id} com alta precisão...")
-                        refined_segs = precision_transcriber.retranscribe_clip_range(
-                            vpath,
-                            start=c_start,
-                            end=c_end,
-                            language=clip_lang,
-                            audio_wav_path=transcript_data.get("audio_wav"),
-                        )
-                        if refined_segs:
-                            clip_segs = refined_segs
-                    except Exception as exc:
-                        if progress_callback:
-                            progress_callback(f"Passada 2 ignorada em #{cut_id} ({exc}); usando transcrição base.")
-
-                if refine_captions_with_llm and clip_segs:
-                    try:
-                        from src.llm_pool import has_active_pool, refine_segment_captions_with_pool
-
-                        if has_active_pool():
-                            clip_segs, used_llm = refine_segment_captions_with_pool(
-                                clip_segs,
-                                game_context=vpath.stem,
-                                language=clip_lang,
-                            )
-                            if progress_callback:
-                                progress_callback(f"[{idx}/{len(cuts)}] Legendas lapidadas via {used_llm}.")
-                    except Exception as exc:
-                        if progress_callback:
-                            progress_callback(f"Lapidação LLM ignorada em #{cut_id} ({exc}).")
-
-                ass_path = TEMP_DIR / f"cut_{cut_id}.ass"
-                self.captioner.generate_ass(
-                    transcript_data={"segments": clip_segs},
-                    cut_start=c_start,
-                    cut_end=c_end,
-                    output_ass_path=ass_path,
-                    hook_text=str(cut.get("hook_text", "")),
-                    layout_mode=crop_res.mode,
-                )
-                ass_rel_posix = ass_path.relative_to(PROJECT_ROOT).as_posix()
-
-            filter_complex, extra_inputs = self._build_filter_complex(
-                crop_res, ass_rel_posix, clip_duration=duration
-            )
-
-            if progress_callback:
-                progress_callback(
-                    f"[{idx}/{len(cuts)}] Renderizando {out_mp4.name} ({crop_res.mode}, {self.preferred_encoder})..."
-                )
-
-            ok, err = self._run_ffmpeg_render(
-                video_path=vpath,
-                start=c_start,
-                duration=duration,
-                filter_complex=filter_complex,
-                has_audio=has_audio,
-                output_file=out_mp4,
-                encoder=self.preferred_encoder,
-                extra_inputs=extra_inputs,
-            )
-            used_encoder = self.preferred_encoder
-
-            if not ok and self.preferred_encoder != "libx264":
-                if progress_callback:
-                    progress_callback(
-                        f"Fallback automático para libx264 em {out_mp4.name}..."
-                    )
-                used_encoder = "libx264"
-                ok, err = self._run_ffmpeg_render(
-                    video_path=vpath,
-                    start=c_start,
-                    duration=duration,
-                    filter_complex=filter_complex,
-                    has_audio=has_audio,
-                    output_file=out_mp4,
-                    encoder="libx264",
-                    extra_inputs=extra_inputs,
-                )
-
-            if not ok:
-                raise RuntimeError(f"Erro ao renderizar {out_mp4.name}: {err}")
-
-            clip_info = probe_video_info(out_mp4)
-            record = {
-                "id": cut_id,
-                "title": safe_title,
-                "source_video": vpath.name,
-                "source_stem": vpath.stem,
-                "output_path": str(out_mp4),
-                "start": c_start,
-                "end": c_end,
-                "duration": clip_info.get("duration", duration),
-                "duration_type": cut.get("duration_type", f"{int(round(duration))}s"),
-                "size_mb": clip_info.get("size_mb", 0.0),
-                "layout_mode": crop_res.mode,
-                "encoder": used_encoder,
-                "hook_text": cut.get("hook_text", ""),
-                "context_reason": cut.get("context_reason", ""),
-                "youtube_title": cut.get("youtube_title", ""),
-                "youtube_description": cut.get("youtube_description", ""),
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-            }
-            rendered_records.append(record)
-
-            # Save index incrementally after each clip for safe batch resume
-            existing_index = [r for r in existing_index if r.get("output_path") != str(out_mp4)]
-            existing_index.insert(0, record)
-            _save_projects_index(existing_index)
+        finally:
+            stop_event.set()
+            prep_thread.join(timeout=2.0)
 
         if progress_callback:
             progress_callback(f"Renderização concluída: {len(rendered_records)} Shorts salvos em {project_out_dir}")

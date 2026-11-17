@@ -477,7 +477,7 @@ def _attach_file_via_cdp(page, file_input, vpath: Path) -> None:
     file_input.set_input_files(str(vpath))
 
 
-def upload_single_short(
+def _start_short_upload_tab(
     page,
     video_path: str | Path,
     title: str,
@@ -485,8 +485,8 @@ def upload_single_short(
     visibility: str = "PUBLIC",
     progress_callback: Callable[[str], None] | None = None,
     thumbnail_path: str | Path | None = None,
-) -> tuple[bool, str]:
-    """Upload one MP4 to YouTube Studio through the open logged-in browser page."""
+) -> tuple[bool, dict[str, Any] | str]:
+    """Open upload wizard in `page`, fill metadata, and leave it uploading at Visibility step."""
     vpath = Path(video_path).resolve()
     if not vpath.is_file():
         return False, f"Arquivo não encontrado: {vpath}"
@@ -552,7 +552,6 @@ def upload_single_short(
             if progress_callback:
                 progress_callback(f"ℹ️ Miniatura não anexada no upload ({exc}); seguindo publicação.")
 
-    # Grab video URL early if displayed on right-hand side card
     yt_url = ""
     try:
         link_el = page.locator('a[href*="youtu.be/"], a[href*="youtube.com/shorts/"]').first
@@ -562,14 +561,13 @@ def upload_single_short(
         pass
 
     # Step through Next x3 (Details -> Video Elements -> Checks -> Visibility)
-    for step_idx in range(3):
+    for _ in range(3):
         next_btn = page.locator("ytcp-uploads-dialog #next-button, #next-button").first
         next_btn.wait_for(state="visible", timeout=35000)
         next_btn.scroll_into_view_if_needed()
         next_btn.click()
-        time.sleep(1.2)
+        time.sleep(1.0)
 
-    # Select Visibility
     vis_key = visibility.upper().strip()
     if vis_key not in ("PUBLIC", "UNLISTED", "PRIVATE"):
         vis_key = "PUBLIC"
@@ -577,89 +575,137 @@ def upload_single_short(
     vis_radio.wait_for(state="visible", timeout=25000)
     vis_radio.scroll_into_view_if_needed()
     vis_radio.click()
-    time.sleep(0.8)
+    time.sleep(0.6)
 
-    # Wait until file upload completes 100% (avoid clicking Done or closing tab while bytes are still uploading)
     if progress_callback:
-        progress_callback(f"Aguardando envio 100% de {vpath.name} antes de publicar...")
+        progress_callback(f"⏳ {vpath.name} enviando em segundo plano...")
 
-    done_btn = page.locator("#done-button").first
-    deadline = time.time() + 600.0
-    last_prog_report = 0.0
-    saw_upload_signal = False
-    while time.time() < deadline:
-        prog_text = ""
-        try:
-            # Check upload progress bar / dialog footer text broadly
-            for sel in (
-                "ytcp-video-upload-progress",
-                "ytcp-uploads-dialog .progress-label",
-                "span.progress-label",
-            ):
-                loc = page.locator(sel).first
-                if loc.count() > 0:
-                    txt = loc.inner_text().strip()
-                    if txt:
-                        prog_text = txt
-                        break
-        except Exception:
-            pass
+    return True, {
+        "page": page,
+        "vpath": vpath,
+        "yt_url": yt_url,
+        "done_btn": page.locator("#done-button").first,
+        "deadline": time.time() + 600.0,
+        "last_prog_report": 0.0,
+        "saw_upload_signal": False,
+    }
 
-        low = prog_text.lower()
-        is_pct_uploading = bool(re.search(r"\b\d{1,3}%", low)) and "100%" not in low
-        is_uploading_word = any(k in low for k in ("enviando", "uploading", "restante", "left", "envio:"))
-        upload_done_word = any(
-            k in low
-            for k in (
-                "100%",
-                "envio concluído",
-                "upload complete",
-                "processando",
-                "processing",
-                "verificações",
-                "checks",
-                "nenhum problema",
-                "no issues",
-            )
-        )
-        if is_pct_uploading or is_uploading_word or upload_done_word:
-            saw_upload_signal = True
 
-        still_uploading = is_pct_uploading or (is_uploading_word and not upload_done_word)
-        is_disabled = (done_btn.get_attribute("aria-disabled") or "false").lower() == "true"
+def _poll_upload_tab(
+    state: dict[str, Any],
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[str, str]:
+    """Check one uploading tab; if 100% done, click Publish, close tab immediately, and return ('done', url)."""
+    page = state["page"]
+    vpath: Path = state["vpath"]
+    done_btn = state["done_btn"]
+    deadline: float = state["deadline"]
 
-        if not still_uploading and not is_disabled and (upload_done_word or not saw_upload_signal or time.time() > deadline - 585):
-            # Give UI 1.5s to stabilize once 100% / processing starts
-            time.sleep(1.5)
-            break
+    if time.time() >= deadline:
+        return "error", "Timeout aguardando conclusão do envio no YouTube Studio."
 
-        if progress_callback and time.time() - last_prog_report >= 6.0 and prog_text:
-            last_prog_report = time.time()
-            progress_callback(f"  Progresso YouTube ({vpath.name}): {prog_text.replace(chr(10), ' ')}")
-        time.sleep(1.5)
-
-    # Refresh share URL before clicking Done
-    if not yt_url:
-        try:
-            link_el = page.locator('a[href*="youtu.be/"], a[href*="youtube.com/shorts/"]').first
-            if link_el.count() > 0:
-                yt_url = (link_el.get_attribute("href") or "").strip()
-        except Exception:
-            pass
-
-    done_btn.click()
-    time.sleep(3.5)
-
-    # Wait for share/published confirmation modal before closing tab
+    prog_text = ""
     try:
-        close_btn = page.locator("ytcp-video-share-dialog #close-button, #close-button").first
-        if close_btn.is_visible(timeout=15000):
-            close_btn.click()
-            time.sleep(1.2)
+        for sel in (
+            "ytcp-video-upload-progress",
+            "ytcp-uploads-dialog .progress-label",
+            "span.progress-label",
+        ):
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                txt = loc.inner_text().strip()
+                if txt:
+                    prog_text = txt
+                    break
     except Exception:
         pass
 
-    return True, yt_url or "Publicado no YouTube Studio"
+    low = prog_text.lower()
+    is_pct_uploading = bool(re.search(r"\b\d{1,3}%", low)) and "100%" not in low
+    is_uploading_word = any(k in low for k in ("enviando", "uploading", "restante", "left", "envio:"))
+    upload_done_word = any(
+        k in low
+        for k in (
+            "100%",
+            "envio concluído",
+            "upload complete",
+            "processando",
+            "processing",
+            "verificações",
+            "checks",
+            "nenhum problema",
+            "no issues",
+        )
+    )
+    if is_pct_uploading or is_uploading_word or upload_done_word:
+        state["saw_upload_signal"] = True
+
+    still_uploading = is_pct_uploading or (is_uploading_word and not upload_done_word)
+    try:
+        is_disabled = (done_btn.get_attribute("aria-disabled") or "false").lower() == "true"
+    except Exception:
+        is_disabled = True
+
+    if not still_uploading and not is_disabled and (
+        upload_done_word or not state["saw_upload_signal"] or time.time() > deadline - 585
+    ):
+        time.sleep(1.2)
+        yt_url = state["yt_url"]
+        if not yt_url:
+            try:
+                link_el = page.locator('a[href*="youtu.be/"], a[href*="youtube.com/shorts/"]').first
+                if link_el.count() > 0:
+                    yt_url = (link_el.get_attribute("href") or "").strip()
+            except Exception:
+                pass
+
+        done_btn.click()
+        time.sleep(2.5)
+        try:
+            close_btn = page.locator("ytcp-video-share-dialog #close-button, #close-button").first
+            if close_btn.is_visible(timeout=12000):
+                close_btn.click()
+                time.sleep(0.8)
+        except Exception:
+            pass
+        return "done", yt_url or "Publicado no YouTube Studio"
+
+    if progress_callback and time.time() - state["last_prog_report"] >= 8.0 and prog_text:
+        state["last_prog_report"] = time.time()
+        progress_callback(f"  Progresso YouTube ({vpath.name}): {prog_text.replace(chr(10), ' ')}")
+    return "uploading", ""
+
+
+def upload_single_short(
+    page,
+    video_path: str | Path,
+    title: str,
+    description: str,
+    visibility: str = "PUBLIC",
+    progress_callback: Callable[[str], None] | None = None,
+    thumbnail_path: str | Path | None = None,
+) -> tuple[bool, str]:
+    """Upload one MP4 to YouTube Studio through the open logged-in browser page."""
+    ok, res = _start_short_upload_tab(
+        page=page,
+        video_path=video_path,
+        title=title,
+        description=description,
+        visibility=visibility,
+        progress_callback=progress_callback,
+        thumbnail_path=thumbnail_path,
+    )
+    if not ok:
+        return False, str(res)
+    state = res
+    assert isinstance(state, dict)
+    while True:
+        status, msg = _poll_upload_tab(state, progress_callback=progress_callback)
+        if status == "done":
+            return True, msg
+        if status == "error":
+            return False, msg
+        time.sleep(1.5)
 
 
 def upload_queue(
@@ -709,6 +755,54 @@ def upload_queue(
         browser = p.chromium.connect_over_cdp(f"http://127.0.0.1:{active_port}")
         ctx = browser.contexts[0] if browser.contexts else browser.new_context()
 
+        max_concurrent_tabs = 2
+        pending_tabs: list[dict[str, Any]] = []
+
+        def _finalize_tab(entry: dict[str, Any], ok: bool, msg: str) -> None:
+            item = entry["item"]
+            vpath = entry["vpath"]
+            try:
+                entry["page"].close()
+            except Exception:
+                pass
+            if ok:
+                history[vpath] = {
+                    "id": item["id"],
+                    "filename": item["filename"],
+                    "youtube_title": item["youtube_title"],
+                    "visibility": visibility,
+                    "youtube_url": msg if msg.startswith("http") else "",
+                    "posted_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                _save_uploaded_history(history)
+                item["status"] = "posted"
+                item["youtube_url"] = history[vpath]["youtube_url"]
+                if progress_callback:
+                    progress_callback(f"✅ #{item['id']} publicado e aba fechada! {item['youtube_url']}")
+                results.append({**item, "status": "posted"})
+            else:
+                if progress_callback:
+                    progress_callback(f"❌ Falha no #{item['id']}: {msg}")
+                results.append({**item, "status": f"error: {msg}"})
+
+        def _drain_ready_tabs(wait_until_below: int) -> None:
+            while len(pending_tabs) >= wait_until_below and pending_tabs:
+                still_running: list[dict[str, Any]] = []
+                for entry in pending_tabs:
+                    try:
+                        status, msg = _poll_upload_tab(entry["state"], progress_callback=progress_callback)
+                    except Exception as exc:
+                        status, msg = "error", str(exc)
+                    if status == "done":
+                        _finalize_tab(entry, True, msg)
+                    elif status == "error":
+                        _finalize_tab(entry, False, msg)
+                    else:
+                        still_running.append(entry)
+                pending_tabs[:] = still_running
+                if len(pending_tabs) >= wait_until_below and pending_tabs:
+                    time.sleep(1.2)
+
         for idx, item in enumerate(targets, start=1):
             vpath = str(Path(item["video_path"]).resolve())
             if skip_posted and vpath in history:
@@ -716,6 +810,8 @@ def upload_queue(
                     progress_callback(f"[{idx}/{len(targets)}] Pulando #{item['id']} já postado: {item['filename']}")
                 results.append({**item, "status": "skipped_already_posted"})
                 continue
+
+            _drain_ready_tabs(max_concurrent_tabs)
 
             if progress_callback:
                 progress_callback(
@@ -738,7 +834,7 @@ def upload_queue(
 
             upload_page = ctx.new_page()
             try:
-                ok, msg = upload_single_short(
+                ok, res = _start_short_upload_tab(
                     page=upload_page,
                     video_path=vpath,
                     title=item["youtube_title"],
@@ -748,35 +844,14 @@ def upload_queue(
                     thumbnail_path=thumb_path,
                 )
             except Exception as exc:
-                ok, msg = False, str(exc)
-            finally:
-                try:
-                    upload_page.close()
-                except Exception:
-                    pass
+                ok, res = False, str(exc)
 
-            if ok:
-                history[vpath] = {
-                    "id": item["id"],
-                    "filename": item["filename"],
-                    "youtube_title": item["youtube_title"],
-                    "visibility": visibility,
-                    "youtube_url": msg if msg.startswith("http") else "",
-                    "posted_at": datetime.now().isoformat(timespec="seconds"),
-                }
-                _save_uploaded_history(history)
-                item["status"] = "posted"
-                item["youtube_url"] = history[vpath]["youtube_url"]
-                if progress_callback:
-                    progress_callback(f"✅ #{item['id']} publicado! {item['youtube_url']}")
-                results.append({**item, "status": "posted"})
+            if ok and isinstance(res, dict):
+                pending_tabs.append({"item": item, "vpath": vpath, "page": upload_page, "state": res})
             else:
-                if progress_callback:
-                    progress_callback(f"❌ Falha no #{item['id']}: {msg}")
-                results.append({**item, "status": f"error: {msg}"})
-                if "não está logada" in msg:
-                    break
-            time.sleep(2.0)
+                _finalize_tab({"item": item, "vpath": vpath, "page": upload_page}, False, str(res))
+
+        _drain_ready_tabs(1)
 
     generate_youtube_queue()
     return results

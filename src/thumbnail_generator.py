@@ -114,6 +114,40 @@ def _wrap_hook_lines(text: str, font: ImageFont.FreeTypeFont, max_width_px: int,
     return lines[:4]
 
 
+def _apply_fisheye_bulge(
+    rgba_img: Image.Image,
+    cy: float,
+    ry: float,
+    strength: float = 0.36,
+) -> Image.Image:
+    """Apply a smooth elliptical fisheye/bulge warp to an RGBA text overlay layer."""
+    arr = np.array(rgba_img, dtype=np.uint8)
+    h, w = arr.shape[:2]
+    cx = w / 2.0
+    rx = w * 0.50
+    ry = max(220.0, ry)
+
+    y_idx, x_idx = np.indices((h, w), dtype=np.float32)
+    dx = (x_idx - cx) / rx
+    dy = (y_idx - cy) / ry
+    r2 = dx * dx + dy * dy
+
+    # Smooth Gaussian-weighted barrel magnification ("gordinha" center bulge)
+    scale = 1.0 / (1.0 + strength * np.exp(-r2 * 1.15))
+    map_x = (cx + (x_idx - cx) * scale).astype(np.float32)
+    map_y = (cy + (y_idx - cy) * scale).astype(np.float32)
+
+    warped = cv2.remap(
+        arr,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0, 0),
+    )
+    return Image.fromarray(warped, mode="RGBA")
+
+
 def render_hook_thumbnail(
     base_img: Image.Image,
     hook_text: str,
@@ -158,13 +192,13 @@ def render_hook_thumbnail(
     composed = Image.alpha_composite(img.convert("RGBA"), overlay)
     draw = ImageDraw.Draw(composed)
 
-    # Pick largest font size that fits cleanly in <= 3-4 lines
-    font_size = 112
+    # Pick largest font size that fits cleanly in <= 3-4 lines (leaving room for fisheye bulge)
+    font_size = 104
     lines: list[str] = []
     font = _load_bold_font(font_size)
-    while font_size >= 64:
+    while font_size >= 60:
         font = _load_bold_font(font_size)
-        lines = _wrap_hook_lines(clean_hook, font, max_width_px=940, draw=draw)
+        lines = _wrap_hook_lines(clean_hook, font, max_width_px=840, draw=draw)
         if len(lines) <= 3:
             break
         font_size -= 8
@@ -177,9 +211,10 @@ def render_hook_thumbnail(
     total_h = sum(line_heights)
     start_y = max(480, (target_h - total_h) // 2)
 
-    # Drop shadow layer for extra depth
-    shadow_layer = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
-    sh_draw = ImageDraw.Draw(shadow_layer)
+    # Render Hook text + drop shadow on a dedicated RGBA layer for fisheye warp
+    text_layer = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+    sh_layer = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+    sh_draw = ImageDraw.Draw(sh_layer)
     cur_y = start_y
     for i, ln in enumerate(lines):
         bb = draw.textbbox((0, 0), ln, font=font, stroke_width=10)
@@ -187,18 +222,17 @@ def render_hook_thumbnail(
         x = (target_w - lw) // 2
         sh_draw.text((x + 6, cur_y + 8), ln, font=font, fill=(0, 0, 0, 210), stroke_width=12, stroke_fill=(0, 0, 0, 210))
         cur_y += line_heights[i]
-    shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(radius=6))
-    composed = Image.alpha_composite(composed, shadow_layer)
-    draw = ImageDraw.Draw(composed)
+    sh_layer = sh_layer.filter(ImageFilter.GaussianBlur(radius=6))
+    text_layer = Image.alpha_composite(text_layer, sh_layer)
 
-    # Main vibrant alternating text (Yellow / White)
+    txt_draw = ImageDraw.Draw(text_layer)
     cur_y = start_y
     for i, ln in enumerate(lines):
         bb = draw.textbbox((0, 0), ln, font=font, stroke_width=10)
         lw = bb[2] - bb[0]
         x = (target_w - lw) // 2
         fill_col = (255, 230, 0, 255) if i % 2 == 0 else (255, 255, 255, 255)
-        draw.text(
+        txt_draw.text(
             (x, cur_y),
             ln,
             font=font,
@@ -207,6 +241,15 @@ def render_hook_thumbnail(
             stroke_fill=(0, 0, 0, 255),
         )
         cur_y += line_heights[i]
+
+    text_center_y = start_y + total_h / 2.0
+    text_layer = _apply_fisheye_bulge(
+        text_layer,
+        cy=text_center_y,
+        ry=max(260.0, total_h * 0.90),
+        strength=0.38,
+    )
+    composed = Image.alpha_composite(composed, text_layer)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rgb_out = composed.convert("RGB")

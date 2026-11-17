@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -9,7 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from src import INPUT_DIR, PROJECT_ROOT
+from src import INPUT_DIR, PROJECT_ROOT, PROJECTS_TEMP_DIR
 from src.ffmpeg_utils import get_ffmpeg_path
 
 YTOWAVE_DOWNLOAD_URL = "https://marentropico.github.io/ytowave/"
@@ -124,6 +125,16 @@ def download_youtube_video(
         fmt,
         "--merge-output-format",
         "mp4",
+        "--write-info-json",
+        "--write-thumbnail",
+        "--convert-thumbnails",
+        "jpg",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-format",
+        "json3",
+        "--sub-langs",
+        "pt,pt-BR,en",
         "--ffmpeg-location",
         str(Path(ffmpeg_path).parent),
         "-o",
@@ -151,6 +162,7 @@ def download_youtube_video(
 
     final_path: Path | None = None
     last_lines: list[str] = []
+    last_pct_int = -1
     assert proc.stdout is not None
     for raw_line in proc.stdout:
         line = raw_line.strip()
@@ -166,9 +178,11 @@ def download_youtube_video(
 
         if progress_callback:
             if "[download]" in line and "%" in line:
-                m = re.search(r"(\d+(?:\.\d+)?%)", line)
-                pct = m.group(1) if m else ""
-                progress_callback(f"⬇️ Baixando ({pct}): {line}")
+                m = re.search(r"(\d{1,3})(?:\.\d+)?%", line)
+                pct_int = int(m.group(1)) if m else -1
+                if pct_int != last_pct_int:
+                    last_pct_int = pct_int
+                    progress_callback(f"⬇️ Baixando ({pct_int}%): {line}")
             elif line.startswith("[Merger]") or line.startswith("[VideoRemuxer]"):
                 progress_callback(f"🔧 Finalizando MP4: {line}")
             elif line.startswith("ERROR:"):
@@ -185,6 +199,56 @@ def download_youtube_video(
             final_path = mp4s[0]
         else:
             raise RuntimeError("Download concluído, mas o arquivo MP4 final não foi localizado em input/.")
+
+    # Move sidecar .info.json and thumbnail into temp/projects/<stem>/ so input/ stays clean
+    try:
+        proj_dir = PROJECTS_TEMP_DIR / final_path.stem
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        info_src = final_path.with_suffix(".info.json")
+        if info_src.is_file():
+            raw_info = json.loads(info_src.read_text(encoding="utf-8"))
+            clean_meta = {
+                "title": raw_info.get("title", final_path.stem),
+                "channel": raw_info.get("channel") or raw_info.get("uploader") or "",
+                "description": str(raw_info.get("description") or "")[:1200],
+                "tags": (raw_info.get("tags") or [])[:15],
+                "duration": raw_info.get("duration"),
+            }
+            (proj_dir / "video_meta.json").write_text(
+                json.dumps(clean_meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            info_src.unlink(missing_ok=True)
+        for thumb_ext in (".jpg", ".jpeg", ".png", ".webp"):
+            thumb_src = final_path.with_suffix(thumb_ext)
+            if thumb_src.is_file():
+                dst_thumb = proj_dir / "source_thumb.jpg"
+                shutil.move(str(thumb_src), str(dst_thumb))
+                break
+
+        # Move YouTube .json3 subtitles (prefer pt / pt-BR over en) and remove leftover .json3 in input/
+        sub_candidates = sorted(final_path.parent.glob(f"{final_path.stem}*.json3"))
+        if sub_candidates:
+            def _sub_priority(p: Path) -> tuple[int, str]:
+                lower = p.name.lower()
+                if ".pt-br." in lower:
+                    return (0, lower)
+                if ".pt." in lower:
+                    return (1, lower)
+                if ".en." in lower:
+                    return (2, lower)
+                return (3, lower)
+
+            sub_candidates.sort(key=_sub_priority)
+            best_sub = sub_candidates[0]
+            dst_sub = proj_dir / "youtube_subs.json3"
+            if dst_sub.exists():
+                dst_sub.unlink()
+            shutil.move(str(best_sub), str(dst_sub))
+            for leftover in sub_candidates[1:]:
+                if leftover.is_file():
+                    leftover.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     if progress_callback:
         progress_callback(f"✅ Vídeo salvo em input/: {final_path.name}")

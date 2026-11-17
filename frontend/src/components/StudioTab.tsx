@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   Code2,
+  Crosshair,
   Download,
   ExternalLink,
   Eye,
@@ -19,6 +20,7 @@ import {
   Sparkles,
   Terminal,
   Trash2,
+  X,
 } from "lucide-react";
 import { api } from "../api";
 import type {
@@ -26,6 +28,8 @@ import type {
   DownloaderStatus,
   InputVideo,
   JobState,
+  PinFrameInfo,
+  PinnedFaceStatus,
   PresetOption,
   TranscriptMeta,
 } from "../types";
@@ -76,6 +80,16 @@ export function StudioTab({
   const [useLlmPool, setUseLlmPool] = useState(true);
   const [precisionRetranscribe, setPrecisionRetranscribe] = useState(true);
   const [refineCaptions, setRefineCaptions] = useState(true);
+  const [dynamicFaceTracking, setDynamicFaceTracking] = useState(true);
+  const [faceTrackMode, setFaceTrackMode] = useState<"pinned" | "quick_detect">("pinned");
+
+  // Streamer Face Pin
+  const [pinnedStatus, setPinnedStatus] = useState<PinnedFaceStatus | null>(null);
+  const [showPinModal, setShowPinModal] = useState(false);
+  const [pinFrame, setPinFrame] = useState<PinFrameInfo | null>(null);
+  const [pinTimestamp, setPinTimestamp] = useState(60);
+  const [loadingPinFrame, setLoadingPinFrame] = useState(false);
+  const [savingPin, setSavingPin] = useState(false);
 
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showLogs, setShowLogs] = useState(true);
@@ -114,6 +128,65 @@ export function StudioTab({
       setSelectedVideo(videos[0].filename);
     }
   }, [videos, selectedVideo]);
+
+  useEffect(() => {
+    if (!selectedVideo) {
+      setPinnedStatus(null);
+      return;
+    }
+    void api
+      .getPinnedFace(selectedVideo)
+      .then(setPinnedStatus)
+      .catch(() => setPinnedStatus(null));
+  }, [selectedVideo]);
+
+  const loadPinFrameAt = async (ts: number) => {
+    if (!selectedVideo) return;
+    setLoadingPinFrame(true);
+    try {
+      const info = await api.loadPinFrame(selectedVideo, ts);
+      setPinFrame(info);
+      setPinTimestamp(info.timestamp);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : "Erro ao carregar frame", "err");
+    } finally {
+      setLoadingPinFrame(false);
+    }
+  };
+
+  const openPinModal = () => {
+    if (!selectedVideo) return;
+    setShowPinModal(true);
+    const vObj = videos.find((v) => v.filename === selectedVideo);
+    const defaultTs = vObj && vObj.duration > 20 ? Math.min(60, Math.round(vObj.duration * 0.15)) : 5;
+    void loadPinFrameAt(defaultTs);
+  };
+
+  const handlePinClick = async (normX: number, normY: number) => {
+    if (!selectedVideo || !pinFrame) return;
+    setSavingPin(true);
+    try {
+      const res = await api.pinFace(selectedVideo, pinFrame.timestamp, normX, normY);
+      setPinnedStatus({ pinned: res.pinned, thumb_url: res.thumb_url, timestamp: res.timestamp });
+      setShowPinModal(false);
+      onNotify(res.message);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : "Erro ao pinnar rosto", "err");
+    } finally {
+      setSavingPin(false);
+    }
+  };
+
+  const handleClearPin = async () => {
+    if (!selectedVideo) return;
+    try {
+      const res = await api.clearPinnedFace(selectedVideo);
+      setPinnedStatus({ pinned: false, thumb_url: null, timestamp: null });
+      onNotify(res.message);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : "Erro ao remover pin", "err");
+    }
+  };
 
   useEffect(() => {
     setLocalCuts(cuts);
@@ -176,6 +249,8 @@ export function StudioTab({
         use_llm_pool: useLlmPool,
         precision_retranscribe: precisionRetranscribe,
         refine_captions_with_llm: refineCaptions,
+        dynamic_face_tracking: dynamicFaceTracking,
+        face_track_mode: faceTrackMode,
       });
       onStartJob(job_id);
     } catch (err) {
@@ -393,7 +468,43 @@ export function StudioTab({
             {showAdvanced ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
           </button>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={faceTrackMode}
+              onChange={(e) => setFaceTrackMode(e.target.value as "pinned" | "quick_detect")}
+              title="Modo de rastreamento do Circle Crop"
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-200 outline-none focus:border-sky-500"
+            >
+              <option value="pinned">🎯 Streamer Pinnado</option>
+              <option value="quick_detect">🎲 Quick Detect (Memes / Vários Rostos)</option>
+            </select>
+            {faceTrackMode === "pinned" && pinnedStatus?.pinned && pinnedStatus.thumb_url && (
+              <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-200">
+                <img
+                  src={pinnedStatus.thumb_url}
+                  alt="Streamer pinnado"
+                  className="h-5 w-5 rounded-full object-cover"
+                />
+                <span>Rosto pinnado</span>
+                <button
+                  onClick={() => void handleClearPin()}
+                  title="Remover pin"
+                  className="text-emerald-300/70 hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+            {faceTrackMode === "pinned" && (
+              <button
+                disabled={isRunning || !selectedVideo}
+                onClick={openPinModal}
+                className="flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-medium text-amber-300 transition hover:border-amber-500/60 disabled:opacity-50"
+              >
+                <Crosshair className="h-3.5 w-3.5" />
+                {pinnedStatus?.pinned ? "Trocar Rosto Pinnado" : "Pinnar Streamer"}
+              </button>
+            )}
             <button
               disabled={isRunning || !selectedVideo}
               onClick={() => void handlePreviewLayout()}
@@ -496,6 +607,7 @@ export function StudioTab({
                 ["Curadoria Pool IA", useLlmPool, setUseLlmPool],
                 ["Passada 2 (Whisper small)", precisionRetranscribe, setPrecisionRetranscribe],
                 ["Lapidar Legendas Pool IA", refineCaptions, setRefineCaptions],
+                ["Tracking Dinâmico + Auto-Fade Círculo", dynamicFaceTracking, setDynamicFaceTracking],
               ].map(([label, val, setter]) => (
                 <label key={String(label)} className="flex cursor-pointer items-center gap-1.5">
                   <input
@@ -818,6 +930,114 @@ export function StudioTab({
           </div>
         </div>
       </div>
+
+      {/* Streamer Face Pin Modal */}
+      {showPinModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-3xl rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h3 className="flex items-center gap-2 text-base font-semibold text-white">
+                  <Crosshair className="h-4 w-4 text-amber-400" />
+                  Pinnar Rosto do Streamer
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Navegue até um momento onde o streamer apareça bem e clique em cima do rosto dele.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowPinModal(false)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/70 p-3">
+              <span className="text-xs text-slate-400">Momento (s):</span>
+              <input
+                type="range"
+                min={0}
+                max={pinFrame?.duration || 300}
+                step={1}
+                value={pinTimestamp}
+                onChange={(e) => setPinTimestamp(Number(e.target.value))}
+                className="flex-1 accent-amber-400"
+              />
+              <input
+                type="number"
+                min={0}
+                max={pinFrame?.duration || 99999}
+                value={pinTimestamp}
+                onChange={(e) => setPinTimestamp(Number(e.target.value))}
+                className="w-20 rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 font-mono text-xs text-white"
+              />
+              <button
+                disabled={loadingPinFrame}
+                onClick={() => void loadPinFrameAt(pinTimestamp)}
+                className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500 disabled:opacity-50"
+              >
+                {loadingPinFrame ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                Carregar Frame
+              </button>
+            </div>
+
+            <div className="relative overflow-hidden rounded-xl border border-slate-800 bg-slate-950">
+              {loadingPinFrame || savingPin ? (
+                <div className="flex h-80 items-center justify-center gap-2 text-xs text-slate-400">
+                  <Loader2 className="h-5 w-5 animate-spin text-amber-400" />
+                  {savingPin ? "Extraindo assinatura facial..." : "Carregando frame..."}
+                </div>
+              ) : pinFrame ? (
+                <div className="relative inline-block w-full cursor-crosshair">
+                  <img
+                    src={pinFrame.frame_url}
+                    alt="Selecionar rosto"
+                    onClick={(e) => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const nx = (e.clientX - rect.left) / rect.width;
+                      const ny = (e.clientY - rect.top) / rect.height;
+                      void handlePinClick(nx, ny);
+                    }}
+                    className="block w-full select-none"
+                  />
+                  {pinFrame.faces.map((f, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handlePinClick(f.cx, f.cy);
+                      }}
+                      style={{
+                        left: `${f.x * 100}%`,
+                        top: `${f.y * 100}%`,
+                        width: `${f.w * 100}%`,
+                        height: `${f.h * 100}%`,
+                      }}
+                      title="Clique para pinnar este rosto"
+                      className="absolute rounded-md border-2 border-emerald-400 bg-emerald-400/10 transition hover:border-amber-400 hover:bg-amber-400/20"
+                    />
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400">
+              <span>
+                {pinFrame
+                  ? `${pinFrame.faces.length} rosto(s) detectado(s) em ${pinFrame.timestamp}s`
+                  : ""}
+              </span>
+              <span>Clique em qualquer retângulo verde (ou diretamente no rosto) para pinnar.</span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

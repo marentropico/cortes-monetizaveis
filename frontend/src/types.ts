@@ -29,6 +29,29 @@ export interface DownloaderStatus {
   download_page_url: string;
 }
 
+export interface PinnedFaceStatus {
+  pinned: boolean;
+  thumb_url: string | null;
+  timestamp: number | null;
+}
+
+export interface PinFrameInfo {
+  frame_url: string;
+  timestamp: number;
+  duration: number;
+  width: number;
+  height: number;
+  faces: Array<{
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    cx: number;
+    cy: number;
+    score: number;
+  }>;
+}
+
 export interface PresetOption {
   id: string;
   label: string;
