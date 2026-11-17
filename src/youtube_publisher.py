@@ -159,7 +159,7 @@ def _load_source_creator_meta(source_video: str) -> tuple[str, str]:
     if not source_video:
         return "", ""
     stem = Path(source_video).stem
-    meta_path = PROJECT_ROOT / "temp" / "projects" / stem / "video_meta.json"
+    meta_path = TEMP_DIR / "projects" / stem / "video_meta.json"
     if meta_path.is_file():
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
