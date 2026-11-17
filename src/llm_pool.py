@@ -514,8 +514,8 @@ Retorne uma lista JSON onde cada item represente uma decisão da sala e tenha EX
 - "context_reason": 1 frase natural resumindo o consenso da sala sobre por que esse corte viraliza (sem termos técnicos)
 - "youtube_title": título altamente clicável com curiosidade/humor + 1 emoji + 1 hashtag contextual do tema/palavras-chave (máx. 90 caracteres). REGRA ABSOLUTA: NUNCA use #shorts!
 - "youtube_description": 1-2 frases envolventes incorporando as palavras-chave + menção ao criador/canal original + 3-5 hashtags de nicho relevantes ao vídeo/corte (OBRIGATÓRIO incluir hashtags contextuais; PROIBIDO usar #shorts e nunca escreva 'corte automático')
-- "broll_entities": lista com NO MÁXIMO 1 entidade visual (nome próprio/jogo/lugar/objeto) realmente essencial para entender a fala na Wikipédia (deixe [] se não agregar clareza — NÃO polua o vídeo!)
-- "meme_reactions": lista com NO MÁXIMO 1 pico de reação cômica cirúrgica dentro do corte usando EXATAMENTE uma destas tags ("wtf", "shocked", "panic", "mindblown", "rage", "crying", "cringe", "facepalm", "sus", "sneaky", "horny", "evil laugh", "hype", "smug", "laughing", "clown") e o segundo absoluto "at_sec" (deixe [] se o momento já for forte sem meme — uso intencional, sem flood!)
+- "broll_entities": lista com 1 termo visual concreto (nome próprio, jogo, pessoa, lugar ou objeto com página na Wikipédia, ex: ["Grand Theft Auto V"] ou ["Neymar"]) que represente o assunto falado no corte
+- "meme_reactions": lista com 1 pico de reação cômica/emoção no corte usando EXATAMENTE uma destas tags ("wtf", "shocked", "panic", "mindblown", "rage", "crying", "cringe", "facepalm", "sus", "sneaky", "horny", "evil laugh", "hype", "smug", "laughing", "clown") e o segundo absoluto "at_sec" (ex: [{{"sentiment": "wtf", "at_sec": 124.5}}])
 
 TRANSCRIÇÃO:
 {transcript_block}

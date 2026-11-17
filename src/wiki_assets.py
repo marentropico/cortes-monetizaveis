@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import ssl
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -12,6 +13,17 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFilter
 
 USER_AGENT = "HardCleepsStudio/2.0 (https://github.com; desktop-broll-fetcher)"
+
+
+def _urlopen_wiki(req: urllib.request.Request, timeout: float = 6.0):
+    """Open public Wikipedia URL, falling back if local system clock triggers SSL expiry."""
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, ssl.SSLCertVerificationError):
+            ctx = ssl._create_unverified_context()
+            return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+        raise
 
 
 def _slugify(term: str) -> str:
@@ -70,15 +82,42 @@ def fetch_wikipedia_image(term: str, cache_dir: Path) -> Path | None:
     for lang in ("pt", "en"):
         encoded = urllib.parse.quote(clean_term.replace(" ", "_"))
         api_url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{encoded}"
-        req = urllib.request.Request(api_url, headers={"User-Agent": USER_AGENT})
+        thumb = ""
         try:
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
+            req = urllib.request.Request(api_url, headers={"User-Agent": USER_AGENT})
+            with _urlopen_wiki(req, timeout=5.0) as resp:
                 data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            thumb = (data.get("thumbnail") or {}).get("source") or (data.get("originalimage") or {}).get("source")
-            if not thumb:
-                continue
+            thumb = str((data.get("thumbnail") or {}).get("source") or (data.get("originalimage") or {}).get("source") or "")
+        except Exception:
+            thumb = ""
+
+        # Fallback: Wikipedia search API (finds articles for nicknames/phrases like "GTA RP")
+        if not thumb:
+            try:
+                q_enc = urllib.parse.quote(clean_term)
+                search_url = (
+                    f"https://{lang}.wikipedia.org/w/api.php"
+                    f"?action=query&generator=search&gsrsearch={q_enc}&gsrlimit=3"
+                    f"&prop=pageimages&piprop=thumbnail&pithumbsize=600&format=json"
+                )
+                s_req = urllib.request.Request(search_url, headers={"User-Agent": USER_AGENT})
+                with _urlopen_wiki(s_req, timeout=5.0) as s_resp:
+                    s_data = json.loads(s_resp.read().decode("utf-8", errors="replace"))
+                pages = ((s_data.get("query") or {}).get("pages") or {}).values()
+                for pg in sorted(pages, key=lambda x: int(x.get("index", 99))):
+                    src = str((pg.get("thumbnail") or {}).get("source") or "")
+                    if src:
+                        thumb = src
+                        break
+            except Exception:
+                thumb = ""
+
+        if not thumb:
+            continue
+
+        try:
             img_req = urllib.request.Request(thumb, headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(img_req, timeout=8.0) as img_resp:
+            with _urlopen_wiki(img_req, timeout=8.0) as img_resp:
                 raw_bytes = img_resp.read()
             if len(raw_bytes) < 500:
                 continue
@@ -118,21 +157,26 @@ def prepare_broll_events_for_cut(
         if not ent_tokens:
             continue
 
-        # Find first occurrence of the entity in cut_words
+        # Find first occurrence of any entity token in cut_words
         matched_rel: float | None = None
         for w in cut_words:
             w_tok = re.sub(r"[^A-Za-zÀ-ÿ0-9]+", "", str(w.get("word", "")).lower())
             if not w_tok:
                 continue
-            if w_tok == ent_tokens[0] or (len(ent_tokens[0]) >= 5 and ent_tokens[0] in w_tok):
+            if any(w_tok == et or (len(et) >= 4 and et in w_tok) for et in ent_tokens):
                 rel_t = float(w.get("start", cut_start)) - cut_start
-                if 2.2 <= rel_t <= max(2.5, cut_duration - 2.2):
-                    if all(abs(rel_t - ut) >= 4.5 for ut in used_times):
+                if 2.0 <= rel_t <= max(2.4, cut_duration - 2.0):
+                    if all(abs(rel_t - ut) >= 4.0 for ut in used_times):
                         matched_rel = round(rel_t, 2)
                         break
 
+        # Fallback: place naturally in the first third of the cut if entity wasn't matched verbatim
         if matched_rel is None:
-            continue
+            fallback_t = round(min(max(2.5, cut_duration * 0.32), max(2.5, cut_duration - 2.2)), 2)
+            if all(abs(fallback_t - ut) >= 4.0 for ut in used_times):
+                matched_rel = fallback_t
+            else:
+                continue
 
         card_path = fetch_wikipedia_image(ent_clean, cache_dir)
         if card_path and card_path.is_file():

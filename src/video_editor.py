@@ -458,7 +458,7 @@ class VerticalVideoEditor:
                 f"fade=t=in:st=0:d=0.18:alpha=1,"
                 f"fade=t=out:st={fade_out_st:.3f}:d=0.35:alpha=1,"
                 f"setpts=PTS-STARTPTS+{ev_start:.3f}/TB[br{k}];"
-                f"{cur_lbl}[br{k}]overlay=x=(W-w)/2:y=290:enable='between(t,{ev_start:.3f},{ev_end:.3f})':shortest=1{next_lbl}"
+                f"{cur_lbl}[br{k}]overlay=x=(W-w)/2:y=680:enable='between(t,{ev_start:.3f},{ev_end:.3f})':shortest=1{next_lbl}"
             )
             cur_lbl = next_lbl
 
@@ -790,7 +790,7 @@ class VerticalVideoEditor:
                         clip_segs = []
 
                     broll_events: list[dict[str, Any]] = []
-                    max_overlays = 1 if effective_dur < 50.0 else 2
+                    max_overlays = 2
                     entities = (cut.get("broll_entities") or [])[:1]
                     if entities and clip_segs:
                         try:
@@ -827,8 +827,10 @@ class VerticalVideoEditor:
                                 sent = str(mr.get("sentiment", "")).strip()
                                 at_sec = float(mr.get("at_sec", -1.0))
                                 rel_t = at_sec - c_start
+                                if rel_t < 2.0 or rel_t > max(2.2, effective_dur - 2.0):
+                                    rel_t = round(min(max(2.5, effective_dur * 0.65), max(2.5, effective_dur - 2.0)), 2)
                                 if 2.0 <= rel_t <= max(2.2, effective_dur - 2.0):
-                                    if all(abs(rel_t - float(ev["start"])) >= 8.0 for ev in broll_events):
+                                    if all(abs(rel_t - float(ev["start"])) >= 4.5 for ev in broll_events):
                                         gif_p = pick_meme_gif(sent)
                                         if gif_p and gif_p.is_file():
                                             broll_events.append(
