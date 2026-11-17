@@ -280,10 +280,24 @@ def _strip_shorts_hashtag(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
 
+_HASHTAG_STOPWORDS = {
+    "video", "videos", "vídeo", "vídeos", "corte", "cortes", "short", "shorts", "clip", "clips",
+    "mais", "menos", "muito", "muita", "muitos", "muitas", "voce", "você", "voces", "vocês",
+    "para", "como", "isso", "isto", "esse", "essa", "esses", "essas", "este", "esta", "estes", "estas",
+    "tudo", "nada", "algo", "alguem", "alguém", "ninguem", "ninguém", "aqui", "agora", "entao", "então",
+    "quando", "onde", "porque", "porquê", "coisa", "coisas", "melhor", "pior", "maior", "menor",
+    "sobre", "entre", "depois", "antes", "sempre", "nunca", "ainda", "tambem", "também", "mesmo",
+    "realista", "incrivel", "incrível", "absurdo", "insano", "epico", "épico", "novo", "nova",
+    "fazer", "feito", "sendo", "estar", "esta", "está", "estao", "estão", "tinha", "foram", "seria",
+    "this", "that", "these", "those", "with", "from", "your", "yours", "what", "when", "where",
+    "just", "more", "most", "very", "best", "worst", "real", "realistic", "about", "into", "over",
+}
+
+
 def _to_hashtag(term: str) -> str:
-    """Convert a keyword phrase into a valid #Hashtag (ASCII/alphanumeric)."""
+    """Convert a keyword phrase into a valid #Hashtag (filtering stopwords and #shorts)."""
     ascii_term = re.sub(r"[^A-Za-z0-9À-ÿ]+", "", term.strip())
-    if not ascii_term or ascii_term.lower() in ("short", "shorts"):
+    if not ascii_term or ascii_term.lower() in _HASHTAG_STOPWORDS:
         return ""
     return f"#{ascii_term[:32]}"
 
@@ -307,8 +321,11 @@ def _ensure_contextual_hashtags(
 
     if not candidate_tags:
         for src_text in (meta_title, cut_title):
-            for tok in re.findall(r"[A-Za-zÀ-ÿ0-9]{4,}", src_text):
-                if tok.lower() in ("video", "corte", "cortes", "shorts", "short", "para", "como", "isso"):
+            tokens = re.findall(r"[A-Za-zÀ-ÿ0-9]{4,}", src_text)
+            # Prefer capitalized/proper-noun tokens before generic lowercase words
+            ordered = sorted(tokens, key=lambda t: (0 if t[0].isupper() and not t.isupper() else 1))
+            for tok in ordered:
+                if tok.lower() in _HASHTAG_STOPWORDS:
                     continue
                 ht = _to_hashtag(tok)
                 if ht and ht.lower() not in [t.lower() for t in candidate_tags]:
@@ -338,6 +355,39 @@ def _ensure_contextual_hashtags(
         clean_desc = f"{clean_desc}{sep}{' '.join(candidate_tags[:3])}".strip()
 
     return clean_title[:100], clean_desc[:4000]
+
+
+def _ensure_creator_credit(
+    desc: str,
+    meta_channel: str,
+    meta_title: str,
+) -> str:
+    """Guarantee original channel/creator reference in youtube_description without duplicating it."""
+    channel = str(meta_channel or "").strip()
+    title = str(meta_title or "").strip()
+    if not channel and not title:
+        return desc
+
+    low = desc.lower()
+    has_channel = bool(channel and channel.lower() in low)
+    if has_channel:
+        return desc
+
+    credit_parts = []
+    if channel:
+        credit_parts.append(f"Criador/Canal original: {channel}")
+    if title:
+        credit_parts.append(f"Vídeo original: {title[:90]}")
+    credit_line = "🎬 " + " | ".join(credit_parts)
+
+    # Insert credit before trailing hashtags block if present
+    lines = desc.splitlines()
+    if lines and lines[-1].strip().startswith("#"):
+        body = "\n".join(lines[:-1]).strip()
+        tags = lines[-1].strip()
+        return f"{body}\n\n{credit_line}\n\n{tags}".strip()[:4000]
+    sep = "\n\n" if desc else ""
+    return f"{desc}{sep}{credit_line}".strip()[:4000]
 
 
 def select_cuts_with_pool(
@@ -455,6 +505,7 @@ Retorne uma lista JSON onde cada item represente uma decisão da sala e tenha EX
 - "room_debate": objeto curto com a opinião das 3 personalidades ANTES de fechar os timestamps:
   {{"jovem_viral": "...", "cineasta": "...", "comediante": "..."}}
 - "consensus_score": nota de 1.0 a 10.0 dada pela sala (só inclua cortes com nota >= 7.0)
+- "hook_score": nota de 0.0 a 10.0 avaliando EXCLUSIVAMENTE a força do gancho na primeira frase / 3 segundos iniciais (reação forte, grito, pergunta polêmica ou choque; cortes com hook_score < 6.5 serão descartados)
 - "title": slug curto com underscores sem acentos, terminando em _30s, _60s ou _90s (ex: "Susto_No_Castelo_30s")
 - "start": float em segundos (entre {win_start:.1f} e {win_end:.1f}, começando exatamente no cold open definido pelo Cineasta)
 - "end": float em segundos (respeitando a regra de duração e <= {win_end:.1f}, fechando seco na punchline)
@@ -462,7 +513,9 @@ Retorne uma lista JSON onde cada item represente uma decisão da sala e tenha EX
 - "hook_text": frase curta e explosiva em MAIÚSCULAS criada pelo Comediante + Jovem Viral (máx. 6 palavras, SEM hashtags, ex: "NINGUÉM ESPERAVA ESSE FINAL!")
 - "context_reason": 1 frase natural resumindo o consenso da sala sobre por que esse corte viraliza (sem termos técnicos)
 - "youtube_title": título altamente clicável com curiosidade/humor + 1 emoji + 1 hashtag contextual do tema/palavras-chave (máx. 90 caracteres). REGRA ABSOLUTA: NUNCA use #shorts!
-- "youtube_description": 1-2 frases envolventes incorporando as palavras-chave + 3-5 hashtags de nicho relevantes ao vídeo/corte (OBRIGATÓRIO incluir hashtags contextuais; PROIBIDO usar #shorts e nunca escreva 'corte automático')
+- "youtube_description": 1-2 frases envolventes incorporando as palavras-chave + menção ao criador/canal original + 3-5 hashtags de nicho relevantes ao vídeo/corte (OBRIGATÓRIO incluir hashtags contextuais; PROIBIDO usar #shorts e nunca escreva 'corte automático')
+- "broll_entities": lista com NO MÁXIMO 1 entidade visual (nome próprio/jogo/lugar/objeto) realmente essencial para entender a fala na Wikipédia (deixe [] se não agregar clareza — NÃO polua o vídeo!)
+- "meme_reactions": lista com NO MÁXIMO 1 pico de reação cômica cirúrgica dentro do corte usando EXATAMENTE uma destas tags ("wtf", "shocked", "panic", "mindblown", "rage", "crying", "cringe", "facepalm", "sus", "sneaky", "horny", "evil laugh", "hype", "smug", "laughing", "clown") e o segundo absoluto "at_sec" (deixe [] se o momento já for forte sem meme — uso intencional, sem flood!)
 
 TRANSCRIÇÃO:
 {transcript_block}
@@ -533,6 +586,9 @@ TRANSCRIÇÃO:
             score = float(raw.get("consensus_score", 8.0))
             if score < 6.5:
                 continue
+            hook_score = float(raw.get("hook_score", 7.5))
+            if hook_score < 6.5:
+                continue
             if any(_overlaps(c_start, c_end, ex["start"], ex["end"]) for ex in clean_cuts):
                 continue
 
@@ -553,6 +609,21 @@ TRANSCRIÇÃO:
                 meta_title=meta_title,
                 cut_title=title,
             )
+            yt_desc = _ensure_creator_credit(yt_desc, meta_channel=meta_channel, meta_title=meta_title)
+
+            raw_entities = raw.get("broll_entities") or []
+            broll_entities = [str(e).strip()[:40] for e in raw_entities if str(e).strip()][:1] if isinstance(raw_entities, list) else []
+            raw_memes = raw.get("meme_reactions") or []
+            meme_reactions: list[dict[str, Any]] = []
+            if isinstance(raw_memes, list):
+                for mr in raw_memes[:1]:
+                    if isinstance(mr, dict) and mr.get("sentiment") and mr.get("at_sec") is not None:
+                        meme_reactions.append(
+                            {
+                                "sentiment": str(mr["sentiment"]).strip().lower()[:24],
+                                "at_sec": round(float(mr["at_sec"]), 2),
+                            }
+                        )
 
             clean_cuts.append(
                 {
@@ -561,10 +632,13 @@ TRANSCRIÇÃO:
                     "start": c_start,
                     "end": c_end,
                     "duration_type": dtype,
+                    "hook_score": round(hook_score, 1),
                     "hook_text": str(raw.get("hook_text", "OLHA ISSO!")).strip().upper()[:60],
                     "context_reason": str(raw.get("context_reason", "")).strip(),
                     "youtube_title": yt_title,
                     "youtube_description": yt_desc,
+                    "broll_entities": broll_entities,
+                    "meme_reactions": meme_reactions,
                 }
             )
             if max_cuts > 0 and len(clean_cuts) >= max_cuts:

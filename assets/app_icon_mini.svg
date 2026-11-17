@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="purpleGradMini" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#A855F7" />
+      <stop offset="100%" stop-color="#5B21B6" />
+    </linearGradient>
+    <linearGradient id="orangeGradMini" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FB923C" />
+      <stop offset="100%" stop-color="#EA580C" />
+    </linearGradient>
+    <clipPath id="clipLeftMini">
+      <polygon points="0,0 400,0 246,174 274,174 182,296 210,296 108,448 0,448" />
+    </clipPath>
+    <clipPath id="clipRightMini">
+      <polygon points="512,512 108,512 108,448 210,296 182,296 274,174 246,174 400,0 512,0" />
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#clipLeftMini)">
+    <rect x="38" y="38" width="374" height="374" rx="88" fill="url(#purpleGradMini)" />
+    <path
+      d="M 162 138 C 162 126 175 119 185 125 L 322 209 C 332 215 332 231 322 237 L 185 321 C 175 327 162 320 162 308 Z"
+      fill="#FFFFFF"
+    />
+  </g>
+
+  <g transform="translate(46, 36) rotate(4 225 225)">
+    <g clip-path="url(#clipRightMini)">
+      <rect x="38" y="38" width="374" height="374" rx="88" fill="url(#orangeGradMini)" />
+      <path
+        d="M 162 138 C 162 126 175 119 185 125 L 322 209 C 332 215 332 231 322 237 L 185 321 C 175 327 162 320 162 308 Z"
+        fill="#FFFFFF"
+      />
+    </g>
+  </g>
+</svg>

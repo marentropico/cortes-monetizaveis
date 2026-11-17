@@ -591,6 +591,96 @@ def api_clear_records(req: ClearRecordsRequest | None = None) -> dict[str, Any]:
     }
 
 
+@app.get("/api/system/update-status")
+def api_update_status(fetch: bool = True) -> dict[str, Any]:
+    from src.updater import check_for_updates
+
+    return check_for_updates(fetch=fetch)
+
+
+@app.post("/api/system/update-config")
+def api_update_config(payload: dict[str, Any]) -> dict[str, Any]:
+    from src.updater import save_updater_config
+
+    return save_updater_config(bool(payload.get("auto_update", False)))
+
+
+@app.post("/api/system/apply-update")
+def api_apply_update() -> dict[str, Any]:
+    if jobs.is_running():
+        raise HTTPException(
+            status_code=409,
+            detail="Aguarde a tarefa em andamento terminar antes de atualizar o programa.",
+        )
+    from src.updater import spawn_update_and_restart
+
+    spawn_update_and_restart()
+
+    def _delayed_exit() -> None:
+        time.sleep(0.7)
+        os._exit(0)
+
+    threading.Thread(target=_delayed_exit, daemon=True).start()
+    return {"message": "Atualização iniciada; o Hard Cleeps Studio será reiniciado automaticamente."}
+
+
+@app.get("/api/memes/pack")
+def api_memes_pack() -> dict[str, Any]:
+    from src.meme_gifs import list_meme_pack
+
+    return list_meme_pack()
+
+
+@app.get("/api/memes/file/{slug}/{filename}")
+def api_memes_file(slug: str, filename: str) -> FileResponse:
+    from src.meme_gifs import MEME_GIFS_DIR, _slug
+
+    safe_slug = _slug(slug)
+    safe_name = Path(filename).name
+    target = MEME_GIFS_DIR / safe_slug / safe_name
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="GIF não encontrado.")
+    return FileResponse(target, media_type="image/gif")
+
+
+@app.get("/api/memes/search")
+def api_memes_search(q: str, limit: int = 12) -> dict[str, Any]:
+    from src.meme_gifs import search_giphy_candidates
+
+    try:
+        return {"items": search_giphy_candidates(q, limit=limit)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/memes/choose")
+def api_memes_choose(payload: dict[str, Any]) -> dict[str, Any]:
+    from src.meme_gifs import save_chosen_giphy
+
+    sentiment = str(payload.get("sentiment") or "").strip()
+    gif_url = str(payload.get("gif_url") or "").strip()
+    if not sentiment or not gif_url:
+        raise HTTPException(status_code=400, detail="sentiment e gif_url são obrigatórios.")
+    try:
+        saved = save_chosen_giphy(
+            sentiment=sentiment,
+            gif_url=gif_url,
+            giphy_id=str(payload.get("giphy_id") or ""),
+            title=str(payload.get("title") or ""),
+        )
+        return {"message": f"GIF adicionado em '{sentiment}'!", "item": saved}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/memes/{slug}/{filename}")
+def api_memes_delete(slug: str, filename: str) -> dict[str, str]:
+    from src.meme_gifs import delete_meme_gif
+
+    delete_meme_gif(slug, filename)
+    return {"message": f"GIF {filename} removido de {slug}."}
+
+
 @app.post("/api/remotion/export")
 def api_remotion_export() -> dict[str, Any]:
     cuts_path = TEMP_DIR / "cuts.json"

@@ -1,0 +1,234 @@
+{
+  "wtf": [
+    {
+      "id": "jBQGcRXKWWcIUilLj3",
+      "title": "Wait What Omg GIF",
+      "path": "assets/meme_gifs/wtf/meme_2.gif"
+    },
+    {
+      "id": "lnieUIckonF4eA0tGF",
+      "title": "Spider Man Wtf GIF",
+      "path": "assets/meme_gifs/wtf/meme_4.gif"
+    },
+    {
+      "id": "xL7PDV9frcudO",
+      "title": "Question Mark Wtf GIF",
+      "path": "assets/meme_gifs/wtf/meme_5.gif"
+    }
+  ],
+  "shocked": [
+    {
+      "id": "5VKbvrjxpVJCM",
+      "title": "Parks And Recreation Wow GIF",
+      "path": "assets/meme_gifs/shocked/meme_3.gif"
+    },
+    {
+      "id": "lxxOGaDRk4f7R5TkBd",
+      "title": "Speed Wow GIF by STRAPPED!",
+      "path": "assets/meme_gifs/shocked/meme_4.gif"
+    },
+    {
+      "id": "IYjcAIri8C7f8LvLor",
+      "title": "Oh No What GIF",
+      "path": "assets/meme_gifs/shocked/meme_5.gif"
+    }
+  ],
+  "panic": [
+    {
+      "id": "5qoRdabXeT4GY",
+      "title": "Screaming The Muppets GIF",
+      "path": "assets/meme_gifs/panic/meme_4.gif"
+    },
+    {
+      "id": "snEeOh54kCFxe",
+      "title": "Nervous The Office GIF",
+      "path": "assets/meme_gifs/panic/meme_5.gif"
+    },
+    {
+      "id": "e7Te7IzEInCMQhpcBt",
+      "title": "Sweat Sweating GIF",
+      "path": "assets/meme_gifs/panic/meme_6.gif"
+    }
+  ],
+  "mindblown": [
+    {
+      "id": "Um3ljJl8jrnHy",
+      "title": "Tim And Eric Omg GIF",
+      "path": "assets/meme_gifs/mindblown/meme_1.gif"
+    },
+    {
+      "id": "zKBwU2TSfixfz70pJG",
+      "title": "Disbelief Wow GIF by TruRebels",
+      "path": "assets/meme_gifs/mindblown/meme_3.gif"
+    }
+  ],
+  "rage": [
+    {
+      "id": "EtB1yylKGGAUg",
+      "title": "The Office Rage GIF",
+      "path": "assets/meme_gifs/rage/meme_1.gif"
+    },
+    {
+      "id": "o2Bw3O7wjnAWI",
+      "title": "Night Rage GIF",
+      "path": "assets/meme_gifs/rage/meme_3.gif"
+    },
+    {
+      "id": "WxUHSv0syjaxbU4por",
+      "title": "Computer Rage GIF",
+      "path": "assets/meme_gifs/rage/meme_4.gif"
+    }
+  ],
+  "crying": [
+    {
+      "id": "WF7boIogNoMYfyEMfJ",
+      "title": "Crying Inside GIF",
+      "path": "assets/meme_gifs/crying/meme_1.gif"
+    },
+    {
+      "id": "jMT0RXoFezGTgleWb4",
+      "title": "Sad Cry GIF",
+      "path": "assets/meme_gifs/crying/meme_2.gif"
+    },
+    {
+      "id": "hppWdK8gcmzXq",
+      "title": "Spider Man Crying GIF",
+      "path": "assets/meme_gifs/crying/meme_4.gif"
+    }
+  ],
+  "cringe": [
+    {
+      "id": "acgXBmnZjOS0lYImih",
+      "title": "Cat Cringe GIF",
+      "path": "assets/meme_gifs/cringe/meme_3.gif"
+    },
+    {
+      "id": "tHJA1JRzcWDlzzMQ7F",
+      "title": "Awkward Britney Spears GIF by MOODMAN",
+      "path": "assets/meme_gifs/cringe/meme_4.gif"
+    }
+  ],
+  "facepalm": [
+    {
+      "id": "TJawtKM6OCKkvwCIqX",
+      "title": "Jean-Luc Picard Facepalm GIF by MOODMAN",
+      "path": "assets/meme_gifs/facepalm/meme_3.gif"
+    },
+    {
+      "id": "xUA7aKWkjTfDUREx8Y",
+      "title": "Angry Oh No GIF",
+      "path": "assets/meme_gifs/facepalm/meme_4.gif"
+    },
+    {
+      "id": "3xz2BLBOt13X9AgjEA",
+      "title": "Batman Facepalm GIF by We TV",
+      "path": "assets/meme_gifs/facepalm/meme_5.gif"
+    }
+  ],
+  "sus": [
+    {
+      "id": "brYjDJ2FUjn1KL3Pzw",
+      "title": "Suspicious Cannot See GIF",
+      "path": "assets/meme_gifs/sus/meme_4.gif"
+    },
+    {
+      "id": "FILQJbm0u832ry0HFT",
+      "title": "Suspicious James Doakes GIF",
+      "path": "assets/meme_gifs/sus/meme_5.gif"
+    },
+    {
+      "id": "FILQJbm0u832ry0HFT",
+      "title": "Suspicious James Doakes GIF",
+      "path": "assets/meme_gifs/sus/meme_5.gif"
+    },
+    {
+      "id": "nTE6nHdPzsO26VbrYh",
+      "title": "Suspicious Tyler James Williams GIF by ABC Network",
+      "path": "assets/meme_gifs/sus/meme_6.gif"
+    }
+  ],
+  "sneaky": [
+    {
+      "id": "EoW3jhM6MzsONM15zm",
+      "title": "Happy Got You GIF by Bounce",
+      "path": "assets/meme_gifs/sneaky/meme_2.gif"
+    }
+  ],
+  "horny": [
+    {
+      "id": "oeS2n25LaP4kXpjatz",
+      "title": "Good Music Fire GIF by STRAPPED!",
+      "path": "assets/meme_gifs/horny/meme_2.gif"
+    },
+    {
+      "id": "QjEj30mbv4nWQ4SSO9",
+      "title": "Im Ready Lets Go GIF",
+      "path": "assets/meme_gifs/horny/meme_3.gif"
+    },
+    {
+      "id": "9AIzFvMX8cfRJBUzWc",
+      "title": "Smooches Kissing GIF by Justin",
+      "path": "assets/meme_gifs/horny/meme_4.gif"
+    }
+  ],
+  "evil_laugh": [
+    {
+      "id": "xl5QdxfNonh3q",
+      "title": "Mike Myers Evil Laugh GIF",
+      "path": "assets/meme_gifs/evil_laugh/meme_2.gif"
+    },
+    {
+      "id": "xkXd1o8jBkpcig5hNH",
+      "title": "Cat Evil Laugh GIF",
+      "path": "assets/meme_gifs/evil_laugh/meme_4.gif"
+    }
+  ],
+  "hype": [
+    {
+      "id": "8JZmEBXoCgDleNWFUt",
+      "title": "Excited Fired Up GIF by WWE",
+      "path": "assets/meme_gifs/hype/meme_3.gif"
+    },
+    {
+      "id": "Ly4lBWq3bDydVbGtzH",
+      "title": "Good Day Dancing GIF",
+      "path": "assets/meme_gifs/hype/meme_4.gif"
+    },
+    {
+      "id": "t3sZxY5zS5B0z5zMIz",
+      "title": "Happy Lets Go GIF by NHL",
+      "path": "assets/meme_gifs/hype/meme_5.gif"
+    }
+  ],
+  "smug": [
+    {
+      "id": "43VhxnrEOQ44U",
+      "title": "Perfect Loop GIF",
+      "path": "assets/meme_gifs/smug/meme_5.gif"
+    }
+  ],
+  "laughing": [
+    {
+      "id": "XHeLeuirRbwptHhSWd",
+      "title": "Laugh Lol GIF",
+      "path": "assets/meme_gifs/laughing/meme_2.gif"
+    },
+    {
+      "id": "aC1PWOXzqgT6hhC0vZ",
+      "title": "Leonardo Dicaprio Smile GIF",
+      "path": "assets/meme_gifs/laughing/meme_4.gif"
+    }
+  ],
+  "clown": [
+    {
+      "id": "VS2Qcv25O7ZhUZahQA",
+      "title": "Joker Clown GIF",
+      "path": "assets/meme_gifs/clown/meme_2.gif"
+    },
+    {
+      "id": "ciX6EsYj6gxxeT3AFt",
+      "title": "Ball Clown GIF by Jan Metternich",
+      "path": "assets/meme_gifs/clown/meme_3.gif"
+    }
+  ]
+}

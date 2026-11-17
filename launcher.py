@@ -159,14 +159,127 @@ def main() -> None:
             _wait_for_url(target_url, timeout=20.0)
 
         print(f"[Studio] Abrindo janela standalone: {target_url}")
-        print("[Studio] Mantenha este terminal aberto enquanto usa o app (Ctrl+C para encerrar).")
-        _open_standalone_window(target_url)
-
-        backend_proc.wait()
+        if not _run_tray_desktop_window(target_url, _cleanup_all):
+            print("[Studio] Usando fallback Edge/Chrome standalone (Ctrl+C para encerrar).")
+            _open_standalone_window(target_url)
+            backend_proc.wait()
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         _cleanup_all()
+
+
+def _run_tray_desktop_window(target_url: str, on_exit_cb) -> bool:
+    """Launch native WebView2 window with taskbar icon, system tray mini icon, and close-to-tray prompt."""
+    try:
+        import ctypes
+        import threading
+        import pystray
+        import webview
+        from PIL import Image
+    except Exception:
+        return False
+
+    icon_ico = ROOT / "assets" / "app_icon.ico"
+    icon_mini = ROOT / "assets" / "app_icon_mini.png"
+    tray_img = Image.open(icon_mini if icon_mini.is_file() else (ROOT / "assets" / "app_icon.png")).convert("RGBA")
+
+    if os.name == "nt":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("HardCleeps.Studio.9x16")
+        except Exception:
+            pass
+
+    force_quit = {"flag": False}
+    tray_ref: dict[str, object] = {"icon": None}
+    win_ref: dict[str, object] = {"win": None}
+
+    def _show_window(_icon=None, _item=None) -> None:
+        w = win_ref.get("win")
+        if w is not None:
+            try:
+                w.show()
+                w.restore()
+            except Exception:
+                pass
+
+    def _quit_app(_icon=None, _item=None) -> None:
+        force_quit["flag"] = True
+        ti = tray_ref.get("icon")
+        if ti is not None:
+            try:
+                ti.stop()
+            except Exception:
+                pass
+        w = win_ref.get("win")
+        if w is not None:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        on_exit_cb()
+
+    tray_menu = pystray.Menu(
+        pystray.MenuItem("Abrir Hard Cleeps Studio", _show_window, default=True),
+        pystray.MenuItem("Sair do Programa", _quit_app),
+    )
+    tray_icon = pystray.Icon("HardCleepsStudio", tray_img, "Hard Cleeps Studio", tray_menu)
+    tray_ref["icon"] = tray_icon
+
+    window = webview.create_window(
+        "Hard Cleeps Studio — Shorts 9:16",
+        target_url,
+        width=1440,
+        height=920,
+        min_size=(1024, 680),
+    )
+    win_ref["win"] = window
+
+    def _on_closing() -> bool:
+        if force_quit["flag"]:
+            return True
+        if os.name == "nt":
+            # IDYES=6 (Background/Tray), IDNO=7 (Quit), IDCANCEL=2 (Cancel)
+            res = ctypes.windll.user32.MessageBoxW(
+                0,
+                "Deseja manter o Hard Cleeps Studio rodando em segundo plano (nos ícones ocultos)?\n\n"
+                "• Sim = Rodar em segundo plano (mantém processos ativos)\n"
+                "• Não = Sair do programa\n"
+                "• Cancelar = Voltar ao aplicativo",
+                "Fechar Hard Cleeps Studio",
+                0x00000003 | 0x00000020 | 0x00001000,  # MB_YESNOCANCEL | MB_ICONQUESTION | MB_SYSTEMMODAL
+            )
+            if res == 6:
+                try:
+                    window.hide()
+                except Exception:
+                    pass
+                return False
+            if res == 2:
+                return False
+        force_quit["flag"] = True
+        try:
+            tray_icon.stop()
+        except Exception:
+            pass
+        return True
+
+    window.events.closing += _on_closing
+
+    def _start_tray() -> None:
+        try:
+            tray_icon.run()
+        except Exception:
+            pass
+
+    threading.Thread(target=_start_tray, daemon=True).start()
+    start_kwargs = {"icon": str(icon_ico)} if icon_ico.is_file() else {}
+    try:
+        webview.start(**start_kwargs)
+    except TypeError:
+        webview.start()
+    _quit_app()
+    return True
 
 
 if __name__ == "__main__":

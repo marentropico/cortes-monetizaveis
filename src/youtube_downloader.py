@@ -204,6 +204,9 @@ def download_youtube_video(
             clean_meta = {
                 "title": raw_info.get("title", final_path.stem),
                 "channel": raw_info.get("channel") or raw_info.get("uploader") or "",
+                "uploader": raw_info.get("uploader") or raw_info.get("channel") or "",
+                "channel_url": raw_info.get("channel_url") or raw_info.get("uploader_url") or "",
+                "webpage_url": raw_info.get("webpage_url") or "",
                 "description": str(raw_info.get("description") or "")[:1200],
                 "tags": (raw_info.get("tags") or [])[:15],
                 "duration": raw_info.get("duration"),

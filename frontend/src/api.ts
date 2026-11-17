@@ -53,6 +53,67 @@ export const api = {
       body: JSON.stringify({ clear_input_caches }),
     }),
 
+  updateStatus: (fetch = true) =>
+    request<{
+      version: string;
+      current_commit: string;
+      remote_commit: string;
+      branch: string;
+      available: boolean;
+      commits_ahead: number;
+      changelog: string[];
+      needs_pip: boolean;
+      needs_frontend_build: boolean;
+      offline: boolean;
+      auto_update: boolean;
+    }>(`/api/system/update-status?fetch=${fetch ? "true" : "false"}`),
+
+  setAutoUpdate: (auto_update: boolean) =>
+    request<{ auto_update: boolean }>("/api/system/update-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_update }),
+    }),
+
+  applyUpdate: () =>
+    request<{ message: string }>("/api/system/apply-update", {
+      method: "POST",
+    }),
+
+  memesPack: () =>
+    request<{
+      sentiments: Array<{
+        keyword: string;
+        slug: string;
+        items: Array<{ filename: string; title: string; url: string }>;
+      }>;
+    }>("/api/memes/pack"),
+
+  searchGiphy: (q: string, limit = 12) =>
+    request<{
+      items: Array<{ id: string; title: string; preview_url: string; gif_url: string }>;
+    }>(`/api/memes/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+
+  chooseMemeGif: (payload: {
+    sentiment: string;
+    gif_url: string;
+    giphy_id?: string;
+    title?: string;
+  }) =>
+    request<{ message: string; item: { filename: string; url: string; title: string } }>(
+      "/api/memes/choose",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  deleteMemeGif: (slug: string, filename: string) =>
+    request<{ message: string }>(`/api/memes/${encodeURIComponent(slug)}/${encodeURIComponent(filename)}`, {
+      method: "DELETE",
+    }),
+
   exportRemotionProps: () =>
     request<{ message: string }>("/api/remotion/export", { method: "POST" }),
 

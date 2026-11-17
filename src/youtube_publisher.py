@@ -72,7 +72,7 @@ def find_active_cdp_port(preferred: int = 9222) -> int | None:
     return None
 
 
-def launch_chrome_cdp(port: int = 9222) -> tuple[int, str]:
+def launch_chrome_cdp(port: int = 9222, headless: bool = False) -> tuple[int, str]:
     """Launch real Chrome with persistent profile & remote debugging on YouTube Studio."""
     active = find_active_cdp_port(port)
     if active is not None:
@@ -88,11 +88,22 @@ def launch_chrome_cdp(port: int = 9222) -> tuple[int, str]:
     chrome_exe = _find_chrome_executable()
     CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
+    extra_flags = (
+        "--no-first-run --no-default-browser-check "
+        "--disable-background-timer-throttling "
+        "--disable-renderer-backgrounding "
+        "--disable-backgrounding-occluded-windows"
+    )
+    if headless:
+        extra_flags += " --headless=new --disable-gpu --window-size=1440,900"
+    else:
+        extra_flags += " --new-window"
+
     if os.name == "nt":
         cmd_str = (
             f'"{chrome_exe}" --remote-debugging-port={chosen_port} '
             f'--user-data-dir="{CHROME_PROFILE_DIR}" '
-            '--no-first-run --no-default-browser-check --new-window "https://studio.youtube.com"'
+            f'{extra_flags} "https://studio.youtube.com"'
         )
         # Escape single quotes for PowerShell single-quoted literal
         ps_cmd_str = cmd_str.replace("'", "''")
@@ -110,9 +121,7 @@ def launch_chrome_cdp(port: int = 9222) -> tuple[int, str]:
             chrome_exe,
             f"--remote-debugging-port={chosen_port}",
             f"--user-data-dir={CHROME_PROFILE_DIR}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--new-window",
+            *extra_flags.split(),
             "https://studio.youtube.com",
         ]
         subprocess.Popen(cmd, start_new_session=True)
@@ -145,11 +154,37 @@ def _save_uploaded_history(history: dict[str, dict[str, Any]]) -> None:
     HISTORY_FILE.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _load_source_creator_meta(source_video: str) -> tuple[str, str]:
+    """Read original channel/creator and video title from temp/projects/<stem>/video_meta.json."""
+    if not source_video:
+        return "", ""
+    stem = Path(source_video).stem
+    meta_path = PROJECT_ROOT / "temp" / "projects" / stem / "video_meta.json"
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            ch = str(meta.get("channel") or meta.get("uploader") or "").strip()
+            ti = str(meta.get("title") or "").strip()
+            return ch, ti
+        except Exception:
+            pass
+    return "", ""
+
+
 def build_viral_metadata(cut: dict[str, Any], source_video: str = "") -> dict[str, str]:
-    """Build YouTube title (<=100 chars) and SEO description with contextual hashtags (never #shorts)."""
+    """Build YouTube title (<=100 chars) and SEO description with creator credit & hashtags (never #shorts)."""
+    meta_channel, meta_title = _load_source_creator_meta(source_video)
+
     if cut.get("youtube_title") and cut.get("youtube_description"):
         yt_t = re.sub(r"(?i)(?:^|\s)#shorts?\b", "", str(cut["youtube_title"])).strip()
         yt_d = re.sub(r"(?i)(?:^|\s)#shorts?\b", "", str(cut["youtube_description"])).strip()
+        if meta_channel and meta_channel.lower() not in yt_d.lower():
+            credit = f"🎬 Criador/Canal original: {meta_channel}" + (f" | {meta_title[:80]}" if meta_title else "")
+            lines = yt_d.splitlines()
+            if lines and lines[-1].strip().startswith("#"):
+                yt_d = f"{chr(10).join(lines[:-1]).strip()}\n\n{credit}\n\n{lines[-1].strip()}".strip()
+            else:
+                yt_d = f"{yt_d}\n\n{credit}".strip()
         return {
             "youtube_title": yt_t[:100],
             "youtube_description": yt_d[:5000],
@@ -181,10 +216,15 @@ def build_viral_metadata(cut: dict[str, Any], source_video: str = "") -> dict[st
         hashtags = "#zelda #ocarinaoftime #gameplay #alanzoka #cortes #nintendo"
         primary_tag = "#zelda"
     else:
+        _pub_stopwords = {
+            "video", "videos", "vídeo", "vídeos", "corte", "cortes", "short", "shorts",
+            "mais", "menos", "muito", "voce", "você", "para", "como", "isso", "esse", "essa",
+            "realista", "melhor", "tudo", "aqui", "agora", "coisa", "with", "this", "that",
+        }
         stem_tokens = [
             f"#{tok[:28]}"
             for tok in re.findall(r"[A-Za-zÀ-ÿ0-9]{4,}", Path(source_video).stem if source_video else raw_title)
-            if tok.lower() not in ("video", "corte", "cortes", "short", "shorts")
+            if tok.lower() not in _pub_stopwords
         ][:3]
         base_tags = stem_tokens or ["#gameplay", "#cortes"]
         hashtags = " ".join(dict.fromkeys([*base_tags, "#cortes", "#viral"]))
@@ -199,14 +239,17 @@ def build_viral_metadata(cut: dict[str, Any], source_video: str = "") -> dict[st
         yt_title = (base[:max_base].rstrip() + suffix)[:100]
 
     source_credit = (
-        "Trecho cortado da gameplay da Live do Alanzoka"
+        "🎬 Criador/Canal original: Alanzoka (Live)"
         if is_zelda
-        else f"Trecho retirado de: {game_label}"
+        else (
+            f"🎬 Criador/Canal original: {meta_channel} | Vídeo: {meta_title[:80]}"
+            if meta_channel
+            else f"🎬 Vídeo original: {game_label}"
+        )
     )
     yt_desc = (
         f"{hook or raw_title}\n\n"
         f"{reason}\n\n"
-        f"🎬 Conteúdo: {game_label}\n"
         f"{source_credit}\n\n"
         f"{hashtags}"
     ).strip()
@@ -680,16 +723,59 @@ def _poll_upload_tab(
             except Exception:
                 pass
 
+        try:
+            done_btn.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
         done_btn.click()
-        time.sleep(2.5)
+        time.sleep(2.0)
+
+        # Handle secondary "still processing / publish anyway" confirmation if shown
+        for confirm_sel in (
+            "ytcp-uploads-still-processing-dialog #confirm-button",
+            "ytcp-button#confirm-button",
+            'button:has-text("Publicar mesmo assim")',
+            'button:has-text("Publish anyway")',
+        ):
+            try:
+                cbtn = page.locator(confirm_sel).first
+                if cbtn.is_visible(timeout=1200):
+                    cbtn.click()
+                    time.sleep(1.5)
+                    break
+            except Exception:
+                pass
+
+        # Retry click once if #done-button stayed open & enabled (animation/focus miss)
+        try:
+            still_open = done_btn.is_visible(timeout=800) and (
+                (done_btn.get_attribute("aria-disabled") or "false").lower() != "true"
+            )
+            if still_open:
+                done_btn.click()
+                time.sleep(2.0)
+        except Exception:
+            pass
+
+        published_confirmed = False
         try:
             close_btn = page.locator("ytcp-video-share-dialog #close-button, #close-button").first
-            if close_btn.is_visible(timeout=12000):
+            if close_btn.is_visible(timeout=14000):
+                published_confirmed = True
                 close_btn.click()
                 time.sleep(0.8)
         except Exception:
             pass
-        return "done", yt_url or "Publicado no YouTube Studio"
+        if not published_confirmed:
+            try:
+                if not page.locator("ytcp-uploads-dialog").first.is_visible(timeout=1500):
+                    published_confirmed = True
+            except Exception:
+                published_confirmed = True
+
+        if published_confirmed:
+            return "done", yt_url or "Publicado no YouTube Studio"
+        return "uploading", ""
 
     if progress_callback and time.time() - state["last_prog_report"] >= 8.0 and prog_text:
         state["last_prog_report"] = time.time()
@@ -740,6 +826,12 @@ def upload_queue(
 ) -> list[dict[str, Any]]:
     """Upload queued Shorts via Chrome CDP (by selected_paths or [start_id, end_id])."""
     active_port = find_active_cdp_port(port)
+    if active_port is None and CHROME_PROFILE_DIR.is_dir():
+        if progress_callback:
+            progress_callback("🚀 Iniciando Chrome em modo Headless com perfil autenticado...")
+        active_port, _ = launch_chrome_cdp(port, headless=True)
+        if not _cdp_alive(active_port):
+            active_port = find_active_cdp_port(port)
     if active_port is None:
         raise RuntimeError(
             "Chrome CDP não está aberto. Clique em '1️⃣ Abrir Chrome do YouTube Studio' e faça login primeiro."

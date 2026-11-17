@@ -44,6 +44,134 @@ def _save_projects_index(records: list[dict[str, Any]]) -> None:
     )
 
 
+def _compute_jump_cut_ranges(
+    clip_segs: list[dict[str, Any]],
+    cut_start: float,
+    cut_end: float,
+    wav_path: str | Path | None = None,
+    min_silence: float = 1.5,
+    pad: float = 0.18,
+) -> list[tuple[float, float]]:
+    """Return relative [rel_start, rel_end] active ranges, cutting dead silences > min_silence."""
+    total_dur = max(0.5, cut_end - cut_start)
+    if not clip_segs:
+        return [(0.0, total_dur)]
+
+    intervals: list[tuple[float, float]] = []
+    for s in clip_segs:
+        st = max(0.0, float(s.get("start", cut_start)) - cut_start - pad)
+        en = min(total_dur, float(s.get("end", cut_start)) - cut_start + pad)
+        if en > st + 0.05:
+            intervals.append((st, en))
+    if not intervals:
+        return [(0.0, total_dur)]
+
+    intervals.sort()
+    merged: list[list[float]] = [[intervals[0][0], intervals[0][1]]]
+    for st, en in intervals[1:]:
+        if st <= merged[-1][1] + min_silence:
+            merged[-1][1] = max(merged[-1][1], en)
+        else:
+            merged.append([st, en])
+
+    if len(merged) <= 1:
+        return [(0.0, total_dur)]
+
+    # Verify with WAV RMS if available so laughter/reactions without words are preserved
+    wav_file = Path(wav_path) if wav_path else None
+    if wav_file and wav_file.is_file():
+        try:
+            import wave
+            import numpy as np
+
+            with wave.open(str(wav_file), "rb") as wf:
+                sr = wf.getframerate()
+                n_frames = wf.getnframes()
+
+                def _rms_between(rel_a: float, rel_b: float) -> float:
+                    f0 = max(0, min(n_frames, int(round((cut_start + rel_a) * sr))))
+                    f1 = max(f0, min(n_frames, int(round((cut_start + rel_b) * sr))))
+                    if f1 <= f0:
+                        return 0.0
+                    wf.setpos(f0)
+                    raw = wf.readframes(f1 - f0)
+                    arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                    return float(np.sqrt(np.mean(arr * arr))) if len(arr) else 0.0
+
+                speech_rms = [_rms_between(a, b) for a, b in merged]
+                ref_rms = float(np.median(speech_rms)) if speech_rms else 0.0
+                if ref_rms > 1e-4:
+                    final_merged: list[list[float]] = [merged[0]]
+                    for nxt in merged[1:]:
+                        gap_rms = _rms_between(final_merged[-1][1], nxt[0])
+                        if gap_rms >= 0.45 * ref_rms:
+                            final_merged[-1][1] = nxt[1]
+                        else:
+                            final_merged.append(nxt)
+                    merged = final_merged
+        except Exception:
+            pass
+
+    # Keep start/end anchored cleanly if close to boundaries
+    merged[0][0] = 0.0 if merged[0][0] <= min_silence else merged[0][0]
+    if total_dur - merged[-1][1] <= min_silence:
+        merged[-1][1] = total_dur
+
+    return [(round(a, 3), round(b, 3)) for a, b in merged if b - a >= 0.25]
+
+
+def _remap_segments_for_jump_cuts(
+    clip_segs: list[dict[str, Any]],
+    cut_start: float,
+    active_ranges: list[tuple[float, float]],
+) -> list[dict[str, Any]]:
+    """Remap segment and word timestamps into the compressed jump-cut timeline."""
+    if len(active_ranges) <= 1:
+        return clip_segs
+
+    # Precompute cumulative output offset for each active range
+    offsets: list[tuple[float, float, float]] = []
+    acc = 0.0
+    for rs, re_t in active_ranges:
+        offsets.append((rs, re_t, acc))
+        acc += re_t - rs
+
+    def _map_t(abs_t: float) -> float | None:
+        rel = abs_t - cut_start
+        for rs, re_t, out_off in offsets:
+            if rs - 0.05 <= rel <= re_t + 0.05:
+                clamped = max(rs, min(re_t, rel))
+                return round(cut_start + out_off + (clamped - rs), 3)
+        return None
+
+    remapped: list[dict[str, Any]] = []
+    for seg in clip_segs:
+        new_words: list[dict[str, Any]] = []
+        for w in seg.get("words") or []:
+            ms = _map_t(float(w.get("start", 0.0)))
+            me = _map_t(float(w.get("end", 0.0)))
+            if ms is not None and me is not None and me >= ms:
+                nw = dict(w)
+                nw["start"] = ms
+                nw["end"] = max(round(ms + 0.04, 3), me)
+                new_words.append(nw)
+        if new_words:
+            ns = dict(seg)
+            ns["start"] = new_words[0]["start"]
+            ns["end"] = new_words[-1]["end"]
+            ns["words"] = new_words
+            remapped.append(ns)
+        else:
+            ms = _map_t(float(seg.get("start", 0.0)))
+            me = _map_t(float(seg.get("end", 0.0)))
+            if ms is not None and me is not None and me > ms:
+                ns = dict(seg)
+                ns["start"] = ms
+                ns["end"] = me
+                remapped.append(ns)
+    return remapped
+
+
 def list_rendered_clips() -> list[dict[str, Any]]:
     """Return catalog of rendered Shorts clips with metadata, filtering missing files."""
     records = _load_projects_index()
@@ -162,6 +290,7 @@ class VerticalVideoEditor:
         ass_rel_posix: str | None,
         clip_duration: float = 30.0,
         track_info: dict[str, Any] | None = None,
+        broll_events: list[dict[str, Any]] | None = None,
     ) -> tuple[str, list[Path]]:
         sub_suffix = f",subtitles='{ass_rel_posix}'" if ass_rel_posix else ""
 
@@ -252,27 +381,29 @@ class VerticalVideoEditor:
                     base_chain
                     + f"[base][f_circ]overlay=x=696:y=438:shortest=1{sub_suffix}[vout]"
                 )
-            return fc_str, extra_inputs
+            return self._append_broll_overlays(fc_str, extra_inputs, broll_events, sub_suffix)
 
         if crop_info.mode == "split_screen" and crop_info.face_crop:
             fc = crop_info.face_crop
             gc = crop_info.gameplay_crop
-            return (
+            fc_str = (
                 "[0:v]setpts=PTS-STARTPTS,fps=30,split=2[vtop][vbot];"
                 f"[vtop]crop={fc['w']}:{fc['h']}:{fc['x']}:{fc['y']},"
                 "scale=1080:640:flags=lanczos,setsar=1[top];"
                 f"[vbot]crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
                 "scale=1080:1280:flags=lanczos,setsar=1[bot];"
                 f"[top][bot]vstack=inputs=2{sub_suffix}[vout]"
-            ), []
+            )
+            return self._append_broll_overlays(fc_str, [], broll_events, sub_suffix)
 
         if crop_info.mode == "center_only":
             gc = crop_info.gameplay_crop
-            return (
+            fc_str = (
                 "[0:v]setpts=PTS-STARTPTS,fps=30,"
                 f"crop={gc['w']}:{gc['h']}:{gc['x']}:{gc['y']},"
                 f"scale=1080:1920:flags=lanczos,setsar=1{sub_suffix}[vout]"
-            ), []
+            )
+            return self._append_broll_overlays(fc_str, [], broll_events, sub_suffix)
 
         # blur_bg mode
         bg_crop = _compute_gameplay_crop(crop_info.frame_width, crop_info.frame_height, 1080, 1920)
@@ -284,13 +415,58 @@ class VerticalVideoEditor:
             fg_h = 1920
             fg_w = _even(int(round(1920.0 * src_ar)))
 
-        return (
+        fc_str = (
             "[0:v]setpts=PTS-STARTPTS,fps=30,split=2[vbg][vfg];"
             f"[vbg]crop={bg_crop['w']}:{bg_crop['h']}:{bg_crop['x']}:{bg_crop['y']},"
             "scale=1080:1920:flags=bilinear,boxblur=25:5,eq=brightness=-0.12,setsar=1[bg];"
             f"[vfg]scale={fg_w}:{fg_h}:flags=lanczos,setsar=1[fg];"
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2{sub_suffix}[vout]"
-        ), []
+        )
+        return self._append_broll_overlays(fc_str, [], broll_events, sub_suffix)
+
+    @staticmethod
+    def _append_broll_overlays(
+        fc_str: str,
+        extra_inputs: list[Path],
+        broll_events: list[dict[str, Any]] | None,
+        sub_suffix: str,
+    ) -> tuple[str, list[Path]]:
+        """Inject Wikipedia B-roll pop-up + fade-out overlays before subtitles."""
+        if not broll_events:
+            return fc_str, extra_inputs
+        target = f"{sub_suffix}[vout]"
+        if target not in fc_str:
+            return fc_str, extra_inputs
+
+        cur_lbl = "[pre_broll]"
+        out_fc = fc_str.replace(target, cur_lbl)
+        inputs = list(extra_inputs)
+        for k, ev in enumerate(broll_events):
+            img_path = Path(str(ev["image_path"]))
+            if not img_path.is_file():
+                continue
+            inp_idx = 1 + len(inputs)
+            inputs.append(img_path)
+            ev_start = float(ev["start"])
+            ev_dur = max(0.8, float(ev.get("duration", 1.6)))
+            ev_end = ev_start + ev_dur
+            fade_out_st = max(0.2, ev_dur - 0.35)
+            next_lbl = f"[after_br{k}]"
+            scale_step = "scale=320:-2:flags=lanczos," if img_path.suffix.lower() == ".gif" else ""
+            out_fc += (
+                f";[{inp_idx}:v]{scale_step}format=rgba,"
+                f"fade=t=in:st=0:d=0.18:alpha=1,"
+                f"fade=t=out:st={fade_out_st:.3f}:d=0.35:alpha=1,"
+                f"setpts=PTS-STARTPTS+{ev_start:.3f}/TB[br{k}];"
+                f"{cur_lbl}[br{k}]overlay=x=(W-w)/2:y=290:enable='between(t,{ev_start:.3f},{ev_end:.3f})':shortest=1{next_lbl}"
+            )
+            cur_lbl = next_lbl
+
+        if sub_suffix:
+            out_fc += f";{cur_lbl}{sub_suffix.lstrip(',')}[vout]"
+        else:
+            out_fc += f";{cur_lbl}copy[vout]"
+        return out_fc, inputs
 
     def _run_ffmpeg_render(
         self,
@@ -302,20 +478,48 @@ class VerticalVideoEditor:
         output_file: Path,
         encoder: str,
         extra_inputs: list[Path] | None = None,
+        jump_ranges: list[tuple[float, float]] | None = None,
     ) -> tuple[bool, str]:
+        eff_fc = filter_complex
+        use_jump = bool(jump_ranges and len(jump_ranges) > 1)
+        if use_jump and jump_ranges:
+            k_n = len(jump_ranges)
+            v_splits = "".join(f"[vj{i}]" for i in range(k_n))
+            v_trims = ";".join(
+                f"[vj{i}]trim=start={rs:.3f}:end={re_t:.3f},setpts=PTS-STARTPTS[vt{i}]"
+                for i, (rs, re_t) in enumerate(jump_ranges)
+            )
+            v_cat_in = "".join(f"[vt{i}]" for i in range(k_n))
+            v_prefix = f"[0:v]split={k_n}{v_splits};{v_trims};{v_cat_in}concat=n={k_n}:v=1:a=0[v_jc];"
+            eff_fc = v_prefix + eff_fc.replace("[0:v]", "[v_jc]", 1)
+            if has_audio:
+                a_splits = "".join(f"[aj{i}]" for i in range(k_n))
+                a_trims = ";".join(
+                    f"[aj{i}]atrim=start={rs:.3f}:end={re_t:.3f},asetpts=PTS-STARTPTS[at{i}]"
+                    for i, (rs, re_t) in enumerate(jump_ranges)
+                )
+                a_cat_in = "".join(f"[at{i}]" for i in range(k_n))
+                eff_fc += f";[0:a]asplit={k_n}{a_splits};{a_trims};{a_cat_in}concat=n={k_n}:v=0:a=1[a_jc]"
+
         def _build_cmd(use_hwaccel: bool) -> list[str]:
             cmd = [self.ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "error"]
             if use_hwaccel:
                 cmd.extend(["-hwaccel", "d3d11va"])
             cmd.extend(["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(video_path)])
             for extra_inp in extra_inputs or []:
-                cmd.extend(["-loop", "1", "-r", "30", "-t", f"{duration:.3f}", "-i", str(extra_inp)])
+                if Path(extra_inp).suffix.lower() == ".gif":
+                    cmd.extend(["-ignore_loop", "0", "-t", f"{duration:.3f}", "-i", str(extra_inp)])
+                else:
+                    cmd.extend(["-loop", "1", "-r", "30", "-t", f"{duration:.3f}", "-i", str(extra_inp)])
 
-            cmd.extend(["-filter_complex", filter_complex, "-map", "[vout]"])
+            cmd.extend(["-filter_complex", eff_fc, "-map", "[vout]"])
             if has_audio:
-                cmd.extend(
-                    ["-map", "0:a", "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "192k", "-ar", "44100"]
-                )
+                if use_jump:
+                    cmd.extend(["-map", "[a_jc]", "-c:a", "aac", "-b:a", "192k", "-ar", "44100"])
+                else:
+                    cmd.extend(
+                        ["-map", "0:a", "-af", "asetpts=PTS-STARTPTS", "-c:a", "aac", "-b:a", "192k", "-ar", "44100"]
+                    )
             cmd.extend(get_h264_encoder_args(encoder))
             cmd.extend(["-r", "30", "-movflags", "+faststart", str(output_file)])
             return cmd
@@ -526,7 +730,7 @@ class VerticalVideoEditor:
                                     from src.transcriber import GameplayTranscriber
 
                                     if progress_callback:
-                                        progress_callback("Passada 2: carregando Whisper 'small' (beam=5) para legendas de alta precisão...")
+                                        progress_callback("Passada 2: carregando Whisper 'small' (beam=3) para legendas de alta precisão...")
                                     precision_transcriber = GameplayTranscriber(model_size="small")
                                 if progress_callback:
                                     progress_callback(f"[{idx}/{len(cuts)}] Re-transcrevendo trecho #{cut_id} com alta precisão...")
@@ -559,16 +763,84 @@ class VerticalVideoEditor:
                                 if progress_callback:
                                     progress_callback(f"Lapidação LLM ignorada em #{cut_id} ({exc}).")
 
+                        jump_ranges = _compute_jump_cut_ranges(
+                            clip_segs, c_start, c_end, wav_path=transcript_data.get("audio_wav")
+                        )
+                        effective_dur = duration
+                        if len(jump_ranges) > 1:
+                            clip_segs = _remap_segments_for_jump_cuts(clip_segs, c_start, jump_ranges)
+                            effective_dur = max(1.0, sum(re_t - rs for rs, re_t in jump_ranges))
+                            if progress_callback:
+                                saved_s = round(duration - effective_dur, 1)
+                                progress_callback(f"[{idx}/{len(cuts)}] Jump-cuts em silêncio: {len(jump_ranges)} blocos (-{saved_s}s mortos).")
+
                         ass_path = TEMP_DIR / f"cut_{cut_id}.ass"
                         self.captioner.generate_ass(
                             transcript_data={"segments": clip_segs},
                             cut_start=c_start,
-                            cut_end=c_end,
+                            cut_end=c_start + effective_dur,
                             output_ass_path=ass_path,
                             hook_text=str(cut.get("hook_text", "")),
                             layout_mode=crop_res.mode,
                         )
                         ass_rel_posix = ass_path.relative_to(PROJECT_ROOT).as_posix()
+                    else:
+                        jump_ranges = [(0.0, duration)]
+                        effective_dur = duration
+                        clip_segs = []
+
+                    broll_events: list[dict[str, Any]] = []
+                    max_overlays = 1 if effective_dur < 50.0 else 2
+                    entities = (cut.get("broll_entities") or [])[:1]
+                    if entities and clip_segs:
+                        try:
+                            from src.wiki_assets import prepare_broll_events_for_cut
+
+                            flat_words = [
+                                w
+                                for s in clip_segs
+                                for w in (s.get("words") or [{"word": s.get("text", ""), "start": s.get("start", c_start)}])
+                            ]
+                            broll_events = prepare_broll_events_for_cut(
+                                entities=entities,
+                                cut_words=flat_words,
+                                cut_start=c_start,
+                                cut_duration=effective_dur,
+                                cache_dir=PROJECTS_TEMP_DIR / vpath.stem / "wiki_assets",
+                                max_events=1,
+                            )
+                            if broll_events and progress_callback:
+                                progress_callback(
+                                    f"[{idx}/{len(cuts)}] {len(broll_events)} B-roll Wikipédia anexado."
+                                )
+                        except Exception:
+                            broll_events = []
+
+                    raw_memes = (cut.get("meme_reactions") or [])[:1]
+                    if raw_memes and len(broll_events) < max_overlays:
+                        try:
+                            from src.meme_gifs import pick_meme_gif
+
+                            for mr in raw_memes:
+                                if len(broll_events) >= max_overlays:
+                                    break
+                                sent = str(mr.get("sentiment", "")).strip()
+                                at_sec = float(mr.get("at_sec", -1.0))
+                                rel_t = at_sec - c_start
+                                if 2.0 <= rel_t <= max(2.2, effective_dur - 2.0):
+                                    if all(abs(rel_t - float(ev["start"])) >= 8.0 for ev in broll_events):
+                                        gif_p = pick_meme_gif(sent)
+                                        if gif_p and gif_p.is_file():
+                                            broll_events.append(
+                                                {
+                                                    "entity": f"meme:{sent}",
+                                                    "image_path": str(gif_p),
+                                                    "start": round(rel_t, 2),
+                                                    "duration": 1.6,
+                                                }
+                                            )
+                        except Exception:
+                            pass
 
                     if face_track_mode == "quick_detect" and layout_mode == "auto" and crop_res.mode != "pip_split":
                         fw, fh = crop_res.frame_width, crop_res.frame_height
@@ -609,7 +881,11 @@ class VerticalVideoEditor:
                             track_info = None
 
                     filter_complex, extra_inputs = self._build_filter_complex(
-                        crop_res, ass_rel_posix, clip_duration=duration, track_info=track_info
+                        crop_res,
+                        ass_rel_posix,
+                        clip_duration=effective_dur,
+                        track_info=track_info,
+                        broll_events=broll_events,
                     )
                     prep_queue.put(
                         {
@@ -621,6 +897,8 @@ class VerticalVideoEditor:
                             "c_start": c_start,
                             "c_end": c_end,
                             "duration": duration,
+                            "effective_dur": effective_dur,
+                            "jump_ranges": jump_ranges,
                             "out_mp4": out_mp4,
                             "crop_res": crop_res,
                             "filter_complex": filter_complex,
@@ -677,6 +955,7 @@ class VerticalVideoEditor:
                     output_file=out_mp4,
                     encoder=self.preferred_encoder,
                     extra_inputs=extra_inputs,
+                    jump_ranges=item.get("jump_ranges"),
                 )
                 used_encoder = self.preferred_encoder
 
@@ -693,6 +972,7 @@ class VerticalVideoEditor:
                         output_file=out_mp4,
                         encoder="libx264",
                         extra_inputs=extra_inputs,
+                        jump_ranges=item.get("jump_ranges"),
                     )
 
                 if not ok:

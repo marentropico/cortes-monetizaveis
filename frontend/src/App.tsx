@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ArrowUpCircle,
   BarChart3,
   Bot,
-  Clapperboard,
   Cpu,
   Film,
   Loader2,
@@ -42,6 +42,13 @@ export function App() {
   const [showClearModal, setShowClearModal] = useState(false);
   const [clearInputCaches, setClearInputCaches] = useState(false);
   const [clearingRecords, setClearingRecords] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{
+    version: string;
+    current_commit: string;
+    available: boolean;
+    commits_ahead: number;
+    auto_update: boolean;
+  } | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
 
   const unsubsRef = useRef<Record<string, () => void>>({});
@@ -151,6 +158,22 @@ export function App() {
         // ignore
       }
     });
+    void api
+      .updateStatus(true)
+      .then((u) => {
+        setUpdateInfo(u);
+        if (u.available && u.auto_update) {
+          void api
+            .applyUpdate()
+            .then((r) => notify(r.message))
+            .catch(() => {
+              // ignore if busy
+            });
+        }
+      })
+      .catch(() => {
+        // offline or local mode
+      });
     const onBeforeUnload = () => {
       try {
         navigator.sendBeacon("/api/system/shutdown");
@@ -198,9 +221,11 @@ export function App() {
       {/* Sidebar */}
       <aside className="hidden w-64 shrink-0 flex-col border-r border-slate-800/80 bg-slate-950/90 p-4 md:flex">
         <div className="mb-6 flex items-center gap-3 px-2">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-sky-500 to-indigo-600 shadow-lg shadow-sky-500/20">
-            <Clapperboard className="h-5 w-5 text-white" />
-          </div>
+          <img
+            src="/favicon.svg"
+            alt="Hard Cleeps"
+            className="h-10 w-10 shrink-0 drop-shadow-md"
+          />
           <div>
             <div className="text-sm font-bold tracking-tight text-white">Hard Cleeps</div>
             <div className="text-[11px] font-medium text-sky-400">Studio 9:16 Standalone</div>
@@ -237,10 +262,28 @@ export function App() {
               Limpar Registros
             </button>
           </div>
+
+          {updateInfo?.available && (
+            <button
+              onClick={() => setTab("system")}
+              className="mt-2 flex w-full items-center gap-2.5 rounded-xl border border-violet-500/40 bg-violet-500/15 px-3.5 py-2.5 text-left text-xs font-semibold text-violet-200 transition hover:bg-violet-500/25"
+            >
+              <ArrowUpCircle className="h-4 w-4 shrink-0 text-orange-400" />
+              <span>Atualização disponível ({updateInfo.commits_ahead})</span>
+            </button>
+          )}
         </nav>
 
         {/* Bottom Status Card */}
         <div className="mt-4 space-y-2 rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-xs">
+          {updateInfo && (
+            <div className="flex items-center justify-between text-slate-400">
+              <span>Versão</span>
+              <span className="font-mono text-slate-300">
+                v{updateInfo.version} • {updateInfo.current_commit}
+              </span>
+            </div>
+          )}
           <div className="flex items-center justify-between text-slate-400">
             <span className="flex items-center gap-1.5">
               <Cpu className="h-3.5 w-3.5 text-sky-400" />
