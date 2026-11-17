@@ -13,6 +13,7 @@ import {
   Rocket,
   Save,
   Square,
+  Trophy,
   Upload,
   X,
 } from "lucide-react";
@@ -33,7 +34,15 @@ export function ShortsTab({ activeJob, refreshKey = 0, onStartJob, onNotify }: S
   const [durFilter, setDurFilter] = useState("Todos");
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [activeClip, setActiveClip] = useState<RenderedClip | null>(null);
-  const [visibility, setVisibility] = useState<"PUBLIC" | "UNLISTED" | "PRIVATE">("PUBLIC");
+  const [visibility, setVisibility] = useState<"PUBLIC" | "UNLISTED" | "PRIVATE" | "SCHEDULED">("PUBLIC");
+  const [scheduleStart, setScheduleStart] = useState(() => {
+    const d = new Date(Date.now() + 60 * 60 * 1000);
+    d.setMinutes(0, 0, 0);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`;
+  });
+  const [scheduleIntervalHours, setScheduleIntervalHours] = useState(8);
+  const [schedulePerSlot, setSchedulePerSlot] = useState(1);
   const [skipPosted, setSkipPosted] = useState(true);
 
   const [chromeReady, setChromeReady] = useState<boolean | null>(null);
@@ -144,13 +153,33 @@ export function ShortsTab({ activeJob, refreshKey = 0, onStartJob, onNotify }: S
     }
   };
 
+  const handleRank = async () => {
+    if (selectedPaths.length === 0) {
+      onNotify("Selecione pelo menos 1 Short para rankear.", "err");
+      return;
+    }
+    try {
+      const { job_id } = await api.rankShorts(selectedPaths);
+      onStartJob(job_id);
+    } catch (err) {
+      onNotify(err instanceof Error ? err.message : "Erro ao iniciar ranking", "err");
+    }
+  };
+
   const handlePublish = async () => {
     if (selectedPaths.length === 0) {
       onNotify("Selecione pelo menos 1 Short para publicar.", "err");
       return;
     }
     try {
-      const { job_id } = await api.uploadYouTube(selectedPaths, visibility, skipPosted);
+      const { job_id } = await api.uploadYouTube(
+        selectedPaths,
+        visibility,
+        skipPosted,
+        visibility === "SCHEDULED" ? scheduleStart : null,
+        scheduleIntervalHours,
+        schedulePerSlot
+      );
       onStartJob(job_id);
     } catch (err) {
       onNotify(err instanceof Error ? err.message : "Erro ao iniciar publicação", "err");
@@ -260,10 +289,11 @@ export function ShortsTab({ activeJob, refreshKey = 0, onStartJob, onNotify }: S
           <div className="flex flex-wrap items-center gap-2.5">
             <select
               value={visibility}
-              onChange={(e) => setVisibility(e.target.value as "PUBLIC" | "UNLISTED" | "PRIVATE")}
+              onChange={(e) => setVisibility(e.target.value as "PUBLIC" | "UNLISTED" | "PRIVATE" | "SCHEDULED")}
               className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100"
             >
               <option value="PUBLIC">Público</option>
+              <option value="SCHEDULED">Programar (Agendar)</option>
               <option value="UNLISTED">Não listado</option>
               <option value="PRIVATE">Privado</option>
             </select>
@@ -289,14 +319,66 @@ export function ShortsTab({ activeJob, refreshKey = 0, onStartJob, onNotify }: S
 
             <button
               disabled={isUploading || selectedPaths.length === 0}
+              onClick={() => void handleRank()}
+              className="flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/15 px-3.5 py-2 text-xs font-bold text-amber-300 transition hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+              title="Avaliar cada Short selecionado na Sala de Reunião (0 a 10) e ordenar do melhor para o pior"
+            >
+              {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trophy className="h-4 w-4" />}
+              Rankear ({selectedPaths.length})
+            </button>
+
+            <button
+              disabled={isUploading || selectedPaths.length === 0}
               onClick={() => void handlePublish()}
               className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-rose-500 to-orange-500 px-4 py-2 text-xs font-bold text-white shadow-lg shadow-rose-500/20 transition hover:from-rose-400 hover:to-orange-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Rocket className="h-4 w-4" />}
-              Publicar ({selectedPaths.length})
+              {visibility === "SCHEDULED" ? `Agendar (${selectedPaths.length})` : `Publicar (${selectedPaths.length})`}
             </button>
           </div>
         </div>
+
+        {visibility === "SCHEDULED" && (
+          <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-violet-500/30 bg-violet-500/10 px-3.5 py-2.5 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-violet-200">1º Lançamento:</span>
+              <input
+                type="datetime-local"
+                value={scheduleStart}
+                onChange={(e) => setScheduleStart(e.target.value)}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1 text-xs text-white"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-violet-200">Intervalo:</span>
+              <select
+                value={scheduleIntervalHours}
+                onChange={(e) => setScheduleIntervalHours(Number(e.target.value))}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1 text-xs text-white"
+              >
+                <option value={4}>4h (6/dia)</option>
+                <option value={6}>6h (4/dia)</option>
+                <option value={8}>8h (3/dia — Ideal p/ Notificações)</option>
+                <option value={12}>12h (2/dia)</option>
+                <option value={24}>24h (1/dia)</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-violet-200">Por horário:</span>
+              <select
+                value={schedulePerSlot}
+                onChange={(e) => setSchedulePerSlot(Number(e.target.value))}
+                className="rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1 text-xs text-white"
+              >
+                <option value={1}>1 Short (Recomendado)</option>
+                <option value={2}>2 Shorts</option>
+              </select>
+            </div>
+            <span className="ml-auto text-[11px] text-violet-300">
+              {selectedPaths.length} vídeo(s) distribuídos a cada {scheduleIntervalHours}h
+            </span>
+          </div>
+        )}
 
         {/* Chrome CDP & Quick Select */}
         <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80 pt-3">
@@ -483,6 +565,25 @@ export function ShortsTab({ activeJob, refreshKey = 0, onStartJob, onNotify }: S
                         <span className="rounded-md bg-slate-800 px-2 py-0.5 font-mono text-[11px] text-slate-300">
                           {clip.duration_type} • {clip.duration}s
                         </span>
+                        {clip.viral_score !== undefined && clip.viral_score !== null && (
+                          <span
+                            title={
+                              clip.ranking_details
+                                ? `Jovem Viral: ${clip.ranking_details.jovem_viral_score} | Cineasta: ${clip.ranking_details.cineasta_score} | Comediante: ${clip.ranking_details.comediante_score}`
+                                : "Nota Viral da Sala de Reunião"
+                            }
+                            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px] font-bold ${
+                              clip.viral_score >= 8
+                                ? "bg-emerald-500/20 text-emerald-300 ring-1 ring-emerald-500/40"
+                                : clip.viral_score >= 6.5
+                                ? "bg-amber-500/20 text-amber-300 ring-1 ring-amber-500/40"
+                                : "bg-rose-500/20 text-rose-300 ring-1 ring-rose-500/40"
+                            }`}
+                          >
+                            <Trophy className="h-3 w-3" />
+                            {clip.viral_score.toFixed(1)}/10
+                          </span>
+                        )}
                       </div>
 
                       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">

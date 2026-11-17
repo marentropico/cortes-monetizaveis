@@ -109,6 +109,16 @@ export interface RenderedClip {
   youtube_title: string;
   youtube_description: string;
   visibility: "PUBLIC" | "UNLISTED" | "PRIVATE";
+  viral_score?: number;
+  ranking_details?: {
+    jovem_viral_score: number;
+    jovem_viral_comment?: string;
+    cineasta_score: number;
+    cineasta_comment?: string;
+    comediante_score: number;
+    comediante_comment?: string;
+    provider?: string;
+  };
 }
 
 export interface ThumbnailItem {

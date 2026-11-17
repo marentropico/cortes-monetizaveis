@@ -744,6 +744,79 @@ ITENS:
     return refined, provider_label
 
 
+def rank_short_in_meeting_room(
+    clip: dict[str, Any],
+    transcript_excerpt: str = "",
+) -> dict[str, Any]:
+    """Evaluate a single rendered Short individually with the 3 Meeting Room archetypes (0-10 mean)."""
+    title = str(clip.get("youtube_title") or clip.get("title") or "Short").strip()
+    hook_text = str(clip.get("hook_text") or "").strip()
+    reason = str(clip.get("context_reason") or "").strip()
+    duration = float(clip.get("duration") or 0.0)
+    desc = str(clip.get("youtube_description") or "").strip()
+
+    system_prompt = (
+        "Você simula uma SALA DE REUNIÃO DE ROTEIRO avaliando UM ÚNICO Short já editado para dar uma nota viral "
+        "rigorosa de 0.0 a 10.0.\n\n"
+        "AS 3 PERSONALIDADES JULGAM COM SEUS CRITÉRIOS PRÓPRIOS:\n"
+        "1. [JOVEM VIRAL]: julga banalidade viral, poder de compartilhamento no WhatsApp/DM, curiosidade e potencial de comentários.\n"
+        "2. [CINEASTA]: julga força do Cold Open nos primeiros 2s, ritmo, clareza do arco narrativo e fechamento seco.\n"
+        "3. [COMEDIANTE]: julga timing cômico, humor/ironia, força do hook e impacto da punchline.\n\n"
+        "Seja criterioso e honesto (não dê 9 para tudo; use toda a escala de 0 a 10). Responda APENAS em JSON válido."
+    )
+
+    user_prompt = f"""
+AVALIE ESTE SHORT INDIVIDUALMENTE:
+- Título: {title}
+- Hook na tela: {hook_text}
+- Duração: {duration:.1f}s
+- Resumo do corte: {reason}
+- Descrição: {desc[:400]}
+- Falas exatas do corte:
+{transcript_excerpt[:2400] or "(sem transcrição detalhada; avalie pelos metadados e hook)"}
+
+Retorne um objeto JSON com EXATAMENTE estas chaves:
+{{
+  "jovem_viral_score": 0.0,
+  "jovem_viral_comment": "1 frase curta",
+  "cineasta_score": 0.0,
+  "cineasta_comment": "1 frase curta",
+  "comediante_score": 0.0,
+  "comediante_comment": "1 frase curta"
+}}
+""".strip()
+
+    parsed, provider_label = call_llm_json(user_prompt, system_prompt=system_prompt, temperature=0.25, max_tokens=1024)
+    if isinstance(parsed, list) and parsed:
+        parsed = parsed[0]
+    if not isinstance(parsed, dict):
+        raise ValueError("Resposta inválida da Sala de Reunião ao rankear Short.")
+
+    def _clamp_score(val: Any) -> float:
+        try:
+            return round(max(0.0, min(10.0, float(val))), 1)
+        except Exception:
+            return 5.0
+
+    s1 = _clamp_score(parsed.get("jovem_viral_score"))
+    s2 = _clamp_score(parsed.get("cineasta_score"))
+    s3 = _clamp_score(parsed.get("comediante_score"))
+    mean_score = round((s1 + s2 + s3) / 3.0, 1)
+
+    return {
+        "viral_score": mean_score,
+        "ranking_details": {
+            "jovem_viral_score": s1,
+            "jovem_viral_comment": str(parsed.get("jovem_viral_comment") or "").strip()[:160],
+            "cineasta_score": s2,
+            "cineasta_comment": str(parsed.get("cineasta_comment") or "").strip()[:160],
+            "comediante_score": s3,
+            "comediante_comment": str(parsed.get("comediante_comment") or "").strip()[:160],
+            "provider": provider_label,
+        },
+    }
+
+
 def _update_channel_glossary(
     orig_items: list[dict[str, Any]],
     corrected_by_idx: dict[int, str],

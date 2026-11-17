@@ -345,6 +345,9 @@ class YouTubeUploadRequest(BaseModel):
     selected_paths: list[str]
     visibility: str = "PUBLIC"
     skip_posted: bool = True
+    schedule_start: str | None = None
+    schedule_interval_hours: float = 6.0
+    schedule_per_slot: int = 1
 
 
 class ThumbnailsRequest(BaseModel):
@@ -1204,6 +1207,13 @@ def api_list_clips(
             }
         )
 
+    enriched.sort(
+        key=lambda x: (
+            0 if x.get("viral_score") is not None else 1,
+            -float(x.get("viral_score") or 0.0),
+            int(x.get("id", 0)),
+        )
+    )
     return {"clips": enriched, "sources": sources, "queue": queue_items}
 
 
@@ -1295,9 +1305,101 @@ def api_youtube_upload(req: YouTubeUploadRequest) -> dict[str, Any]:
                 skip_posted=bool(req.skip_posted),
                 progress_callback=emit,
                 selected_paths=req.selected_paths,
+                schedule_start=req.schedule_start,
+                schedule_interval_hours=float(req.schedule_interval_hours),
+                schedule_per_slot=int(req.schedule_per_slot),
             )
             emit("🎉 Lote YouTube concluído!")
             jobs.finish(job_id, {"uploaded": res})
+        except Exception as exc:
+            jobs.fail(job_id, str(exc))
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"job_id": job_id}
+
+
+@app.post("/api/shorts/rank")
+def api_rank_shorts(req: ThumbnailsRequest) -> dict[str, Any]:
+    if not req.selected_paths:
+        raise HTTPException(status_code=400, detail="Selecione pelo menos 1 Short para rankear.")
+    job_id = jobs.create(
+        "upload", f"Sala de Reunião: Rankeando {len(req.selected_paths)} Short(s)"
+    )
+
+    def _worker() -> None:
+        emit: Callable[[str], None] = lambda msg: jobs.append_log(job_id, msg)
+        try:
+            from src.llm_pool import has_active_pool, rank_short_in_meeting_room
+            from src.video_editor import PROJECTS_INDEX_FILE
+
+            if not has_active_pool():
+                raise RuntimeError("Nenhuma chave LLM ativa no .env para rodar a Sala de Reunião.")
+
+            records = list_rendered_clips()
+            norm_targets = {str(Path(p).resolve()) for p in req.selected_paths if p}
+            targets = [
+                r for r in records if str(Path(str(r.get("output_path", ""))).resolve()) in norm_targets
+            ]
+            if not targets:
+                raise RuntimeError("Nenhum Short selecionado encontrado em projects_index.json.")
+
+            jobs.set_step(job_id, "ranking", 5)
+            emit(f"🏆 Iniciando avaliação individual de {len(targets)} Short(s) na Sala de Reunião...")
+
+            transcript_cache: dict[str, list[dict[str, Any]]] = {}
+
+            def _excerpt_for_clip(clip: dict[str, Any]) -> str:
+                stem = str(clip.get("source_stem") or "").strip()
+                if stem not in transcript_cache:
+                    segs: list[dict[str, Any]] = []
+                    for cand in (
+                        PROJECTS_TEMP_DIR / stem / "transcript.json",
+                        TEMP_DIR / "transcript.json",
+                    ):
+                        if cand.is_file():
+                            try:
+                                segs = json.loads(cand.read_text(encoding="utf-8")).get("segments", [])
+                                break
+                            except Exception:
+                                pass
+                    transcript_cache[stem] = segs
+                c_s = float(clip.get("start") or 0.0)
+                c_e = float(clip.get("end") or c_s + 60.0)
+                lines = [
+                    f"[{float(s.get('start', 0)):.1f}s] {str(s.get('text', '')).strip()}"
+                    for s in transcript_cache[stem]
+                    if float(s.get("end", 0.0)) >= c_s and float(s.get("start", 0.0)) <= c_e
+                ]
+                return "\n".join(lines)
+
+            ranked_count = 0
+            for idx, clip in enumerate(targets, start=1):
+                pct = min(95, int((idx - 1) * 90 / max(1, len(targets))) + 5)
+                jobs.set_step(job_id, "ranking", pct)
+                excerpt = _excerpt_for_clip(clip)
+                res = rank_short_in_meeting_room(clip, transcript_excerpt=excerpt)
+                clip["viral_score"] = res["viral_score"]
+                clip["ranking_details"] = res["ranking_details"]
+                d = res["ranking_details"]
+                ranked_count += 1
+                emit(
+                    f"🏆 [{idx}/{len(targets)}] {Path(str(clip.get('output_path', ''))).name} → "
+                    f"{res['viral_score']:.1f}/10 "
+                    f"(Jovem {d['jovem_viral_score']} | Cineasta {d['cineasta_score']} | Comediante {d['comediante_score']})"
+                )
+
+            records.sort(
+                key=lambda x: (
+                    0 if x.get("viral_score") is not None else 1,
+                    -float(x.get("viral_score") or 0.0),
+                    int(x.get("id", 0)),
+                )
+            )
+            PROJECTS_INDEX_FILE.write_text(
+                json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            emit(f"✅ Ranking concluído ({ranked_count} Short(s) ordenados do maior ao menor potencial viral)!")
+            jobs.finish(job_id, {"ranked": ranked_count})
         except Exception as exc:
             jobs.fail(job_id, str(exc))
 

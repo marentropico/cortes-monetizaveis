@@ -9,7 +9,7 @@ import re
 import subprocess
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -549,6 +549,7 @@ def _start_short_upload_tab(
     visibility: str = "PUBLIC",
     progress_callback: Callable[[str], None] | None = None,
     thumbnail_path: str | Path | None = None,
+    schedule_dt: datetime | None = None,
 ) -> tuple[bool, dict[str, Any] | str]:
     """Open upload wizard in `page`, fill metadata, and leave it uploading at Visibility step."""
     vpath = Path(video_path).resolve()
@@ -633,13 +634,71 @@ def _start_short_upload_tab(
         time.sleep(1.0)
 
     vis_key = visibility.upper().strip()
-    if vis_key not in ("PUBLIC", "UNLISTED", "PRIVATE"):
-        vis_key = "PUBLIC"
-    vis_radio = page.locator(f'tp-yt-paper-radio-button[name="{vis_key}"]').first
-    vis_radio.wait_for(state="visible", timeout=25000)
-    vis_radio.scroll_into_view_if_needed()
-    vis_radio.click()
-    time.sleep(0.6)
+    if vis_key in ("SCHEDULED", "SCHEDULE") and schedule_dt is not None:
+        # Expand Schedule accordion / select Schedule radio button
+        try:
+            exp_btn = page.locator("#second-container-expand-button, tp-yt-paper-radio-button[name=\"SCHEDULE\"], #schedule-radio-button").first
+            exp_btn.wait_for(state="visible", timeout=20000)
+            exp_btn.scroll_into_view_if_needed()
+            exp_btn.click()
+            time.sleep(0.8)
+        except Exception:
+            pass
+        try:
+            sched_radio = page.locator('tp-yt-paper-radio-button[name="SCHEDULE"], #schedule-radio-button').first
+            if sched_radio.is_visible(timeout=4000):
+                sched_radio.click()
+                time.sleep(0.6)
+        except Exception:
+            pass
+
+        # Set date in YouTube Studio datepicker
+        try:
+            dp_trigger = page.locator("#datepicker-trigger, ytcp-date-picker #textbox").first
+            dp_trigger.wait_for(state="visible", timeout=10000)
+            dp_trigger.click()
+            time.sleep(0.4)
+            date_inp = page.locator("ytcp-date-picker input, input[aria-label*='Data'], input[aria-label*='Date']").first
+            if date_inp.is_visible(timeout=5000):
+                cur_val = (date_inp.input_value() or "").strip()
+                if re.match(r"^\d{2}/\d{2}/\d{4}$", cur_val):
+                    fmt_date = schedule_dt.strftime("%d/%m/%Y")
+                elif re.match(r"^[A-Za-z]{3}\s+\d{1,2},\s+\d{4}$", cur_val):
+                    fmt_date = schedule_dt.strftime("%b %d, %Y")
+                else:
+                    fmt_date = schedule_dt.strftime("%d/%m/%Y")
+                date_inp.click()
+                date_inp.press("Control+a")
+                date_inp.fill(fmt_date)
+                date_inp.press("Enter")
+                time.sleep(0.4)
+        except Exception:
+            pass
+
+        # Set time in YouTube Studio timepicker
+        try:
+            time_inp = page.locator("#time-of-day-trigger input, ytcp-time-of-day-picker input").first
+            time_inp.wait_for(state="visible", timeout=8000)
+            cur_t = (time_inp.input_value() or "").upper()
+            fmt_time = schedule_dt.strftime("%I:%M %p") if ("AM" in cur_t or "PM" in cur_t) else schedule_dt.strftime("%H:%M")
+            time_inp.click()
+            time_inp.press("Control+a")
+            time_inp.fill(fmt_time)
+            time_inp.press("Enter")
+            time.sleep(0.4)
+        except Exception:
+            pass
+
+        if progress_callback:
+            progress_callback(f"📅 {vpath.name} programado para {schedule_dt.strftime('%d/%m/%Y %H:%M')}")
+    else:
+        if vis_key not in ("PUBLIC", "UNLISTED", "PRIVATE"):
+            vis_key = "PUBLIC"
+        vis_radio = page.locator(f'tp-yt-paper-radio-button[name="{vis_key}"]').first
+        vis_radio.wait_for(state="visible", timeout=25000)
+        vis_radio.scroll_into_view_if_needed()
+        vis_radio.click()
+        time.sleep(0.6)
 
     if progress_callback:
         progress_callback(f"⏳ {vpath.name} enviando em segundo plano...")
@@ -823,6 +882,9 @@ def upload_queue(
     skip_posted: bool = True,
     progress_callback: Callable[[str], None] | None = None,
     selected_paths: list[str] | None = None,
+    schedule_start: str | None = None,
+    schedule_interval_hours: float = 6.0,
+    schedule_per_slot: int = 1,
 ) -> list[dict[str, Any]]:
     """Upload queued Shorts via Chrome CDP (by selected_paths or [start_id, end_id])."""
     active_port = find_active_cdp_port(port)
@@ -916,6 +978,21 @@ def upload_queue(
                 if len(pending_tabs) >= wait_until_below and pending_tabs:
                     time.sleep(1.2)
 
+        base_schedule_dt: datetime | None = None
+        if visibility.upper().strip() in ("SCHEDULED", "SCHEDULE"):
+            if schedule_start:
+                try:
+                    base_schedule_dt = datetime.fromisoformat(schedule_start.strip())
+                except Exception:
+                    base_schedule_dt = None
+            if base_schedule_dt is None:
+                now_dt = datetime.now()
+                base_schedule_dt = (now_dt + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+            min_allowed = datetime.now() + timedelta(minutes=20)
+            if base_schedule_dt < min_allowed:
+                base_schedule_dt = min_allowed.replace(second=0, microsecond=0)
+
+        scheduled_slot_counter = 0
         for idx, item in enumerate(targets, start=1):
             vpath = str(Path(item["video_path"]).resolve())
             if skip_posted and vpath in history:
@@ -924,11 +1001,18 @@ def upload_queue(
                 results.append({**item, "status": "skipped_already_posted"})
                 continue
 
+            item_schedule_dt: datetime | None = None
+            if base_schedule_dt is not None:
+                slot_idx = scheduled_slot_counter // max(1, int(schedule_per_slot))
+                item_schedule_dt = base_schedule_dt + timedelta(hours=slot_idx * max(0.5, float(schedule_interval_hours)))
+                scheduled_slot_counter += 1
+
             _drain_ready_tabs(max_concurrent_tabs)
 
             if progress_callback:
+                sched_note = f" (📅 {item_schedule_dt.strftime('%d/%m %H:%M')})" if item_schedule_dt else ""
                 progress_callback(
-                    f"[{idx}/{len(targets)}] Postando #{item['id']}: {item['youtube_title']}"
+                    f"[{idx}/{len(targets)}] Postando #{item['id']}: {item['youtube_title']}{sched_note}"
                 )
 
             thumb_path: Path | None = None
@@ -955,6 +1039,7 @@ def upload_queue(
                     visibility=visibility,
                     progress_callback=progress_callback,
                     thumbnail_path=thumb_path,
+                    schedule_dt=item_schedule_dt,
                 )
             except Exception as exc:
                 ok, res = False, str(exc)

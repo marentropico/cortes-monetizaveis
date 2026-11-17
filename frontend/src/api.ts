@@ -233,14 +233,35 @@ export const api = {
   chromeStatus: () =>
     request<{ ready: boolean; message: string }>("/api/youtube/chrome/status"),
 
-  uploadYouTube: (selected_paths: string[], visibility: string, skip_posted: boolean) =>
+  uploadYouTube: (
+    selected_paths: string[],
+    visibility: string,
+    skip_posted: boolean,
+    schedule_start?: string | null,
+    schedule_interval_hours?: number,
+    schedule_per_slot?: number
+  ) =>
     request<{ job_id: string }>("/api/youtube/upload", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ selected_paths, visibility, skip_posted }),
+      body: JSON.stringify({
+        selected_paths,
+        visibility,
+        skip_posted,
+        schedule_start: schedule_start || null,
+        schedule_interval_hours: schedule_interval_hours ?? 6,
+        schedule_per_slot: schedule_per_slot ?? 1,
+      }),
     }),
 
   listThumbnails: () => request<{ thumbnails: ThumbnailItem[] }>("/api/thumbnails"),
+
+  rankShorts: (selected_paths: string[]) =>
+    request<{ job_id: string }>("/api/shorts/rank", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ selected_paths }),
+    }),
 
   generateThumbnails: (selected_paths: string[]) =>
     request<{ count: number; message: string }>("/api/thumbnails/generate", {
